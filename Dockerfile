@@ -42,7 +42,7 @@ EXPOSE 3000
 
 # Set environment to production
 ENV NODE_ENV=production
-ENV TRANSPORT_MODE=sse
+ENV TRANSPORT_MODE=http
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

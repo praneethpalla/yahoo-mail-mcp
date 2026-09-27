@@ -12,8 +12,8 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
-- **Security fix**: the OAuth `redirect_uri` check now matches the exact hostname; the old substring check accepted URLs like `https://evil.example/?claude.ai`.
-- **Offline test suite**: `npm test` runs 32 tests against fake IMAP servers, with no real email login.
+- **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
+- **Offline test suite**: `npm test` runs 40 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Features
 
@@ -530,13 +530,16 @@ docker ps
 | `OAUTH_CLIENT_SECRET` | Yes (Remote) | - | OAuth 2.0 client secret for MCP server authentication (generate with `openssl rand -hex 32`) |
 | `TRANSPORT_MODE` | No | `stdio` | `stdio`, or `http` for remote access (Streamable HTTP at `/mcp` + legacy SSE at `/mcp/sse`; `sse` is an alias) |
 | `PORT` | No | `3000` | Port for HTTP mode (auto-set by Render) |
+| `OAUTH_ACCESS_TOKEN_TTL` | No | `3600` | Access token lifetime in seconds |
+| `OAUTH_REFRESH_TOKEN_TTL` | No | `2592000` | Refresh token lifetime in seconds (30 days). Each refresh token can be used once and is replaced |
+| `ALLOW_UNAUTHENTICATED` | No | - | Set to `true` to run HTTP mode without OAuth. **Local testing only**: anyone who can reach the server can read and change the mailbox |
 | `OAUTH_REDIRECT_HOSTS` | No | `claude.ai,claude.com` | Hostnames allowed as OAuth redirect targets (https only; subdomains allowed; localhost is always allowed). Add other clients, e.g. `chatgpt.com` |
 | `DRAFTS_FOLDER` | No | auto-detected | Drafts folder name. Normally detected from the server's `\Drafts` folder flag (Yahoo: `Draft`) |
 | `IMAP_IDLE_MS` | No | `300000` | Log out of the shared IMAP connection after this many milliseconds without use |
 | `ENV_FILE` | No | `.env` | Env file to load, relative to `server.js` (e.g. `.env.test` for a test account) |
 | `NODE_ENV` | No | `development` | Environment: `development` or `production` |
 
-**Note**: `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` are only required for remote deployments (Render.com). Local stdio mode doesn't require OAuth.
+**Note**: `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` are only required for remote deployments (Render.com); HTTP mode refuses to start without them. Local stdio mode doesn't use OAuth.
 
 ## Available npm Scripts
 
@@ -577,8 +580,13 @@ yahoo-mail-mcp-server/
 
 1. **OAuth 2.0 Protection** (Remote Deployments)
    - Server requires OAuth 2.0 authentication for all MCP requests
-   - Uses authorization code flow with PKCE (Proof Key for Code Exchange)
+   - Uses authorization code flow with PKCE (Proof Key for Code Exchange, S256)
    - Only clients with correct credentials can access your emails
+   - Access tokens are signed (HMAC-SHA256, key derived from `OAUTH_CLIENT_SECRET`) and expire after 1 hour; clients renew them with single-use refresh tokens (30 days) without asking the user to log in again
+   - Tokens need no server-side storage, so they keep working across restarts and Render sleep
+   - **Emergency logout**: changing `OAUTH_CLIENT_SECRET` immediately invalidates every issued token
+   - Authorization codes are random, valid for 60 seconds, single-use, and bound to their `redirect_uri`
+   - HTTP mode refuses to start without OAuth credentials (override with `ALLOW_UNAUTHENTICATED=true` for local testing only)
    - Generate strong random credentials: `openssl rand -hex 16` and `openssl rand -hex 32`
    - Store credentials securely in Render dashboard (marked as "Secret")
 
@@ -595,7 +603,7 @@ yahoo-mail-mcp-server/
    - App passwords can be revoked without changing your main password
 
 4. **Email management operations**
-   - All modification operations are reversible (soft delete, not permanent)
+   - Modification operations are reversible (soft delete, not permanent), except that `update_draft` permanently removes the previous version of the draft it revises
    - Deleted emails are moved to Trash folder (recoverable within 7 days for free accounts)
    - Archive, flag, and read status changes are non-destructive
    - Move operations preserve email content and metadata
@@ -1192,6 +1200,10 @@ MIT License. See the [LICENSE](LICENSE) file. Original work © jtokib; modificat
 
 **Security:**
 - OAuth `redirect_uri` is checked by exact hostname over https. The previous substring check accepted URLs like `https://evil.example/?claude.ai`
+- Access tokens were never expired (despite `expires_in: 3600`), were stored only in memory (lost on every restart), and were built from `Math.random()` with the client ID in plain base64. They are now signed, expiring tokens with random IDs, plus single-use refresh tokens (`refresh_token` grant)
+- Authorization codes are random (`crypto.randomBytes`), expire after 60 seconds, and must match the original `redirect_uri`; a missing PKCE verifier returns an error instead of crashing
+- Client secrets are compared in constant time, and secrets containing `:` work with Basic auth
+- HTTP mode refuses to start without OAuth credentials
 
 ### v3.0.0 (2025-01-18) - UID Migration
 

@@ -13,7 +13,7 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=development
-      - TRANSPORT_MODE=sse
+      - TRANSPORT_MODE=http
       - PORT=3000
       - YAHOO_EMAIL=${YAHOO_EMAIL}
       - YAHOO_APP_PASSWORD=${YAHOO_APP_PASSWORD}

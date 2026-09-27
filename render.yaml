@@ -18,7 +18,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: TRANSPORT_MODE
-        value: sse
+        value: http  # Streamable HTTP at /mcp + legacy SSE at /mcp/sse
       - key: PORT
         fromService:
           type: web
@@ -28,6 +28,10 @@ services:
         sync: false  # Set this in Render Dashboard (Settings > Environment)
       - key: YAHOO_APP_PASSWORD
         sync: false  # Set this in Render Dashboard (Settings > Environment)
+      - key: OAUTH_CLIENT_ID
+        sync: false  # Required: the server refuses to start without OAuth (openssl rand -hex 16)
+      - key: OAUTH_CLIENT_SECRET
+        sync: false  # Required (openssl rand -hex 32); changing it logs out every connected client
 
     # Health check configuration
     healthCheckPath: /health

@@ -20,6 +20,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import crypto from 'crypto';
 import os from 'os';
 import fs from 'fs/promises';
 
@@ -37,13 +38,10 @@ class YahooMailMCPServer {
         // Store active SSE transports (for routing messages)
         this.transports = new Map();
 
-        // Store valid OAuth access tokens (in-memory)
-        // In production, use Redis or a database with TTL
-        this.validTokens = new Set();
-
-        // Store authorization codes for OAuth authorization code flow
-        // In production, use Redis with short TTL (60 seconds)
-        this.authCodes = new Map();
+        // OAuth access/refresh tokens are signed (see issueToken), so they need no storage and survive
+        // restarts. Only these short-lived items are kept in memory:
+        this.authCodes = new Map();          // authorization codes, valid for 60 seconds
+        this.usedRefreshTokens = new Map();  // refresh token id -> expiry, so each refresh token works once
 
         // Shared IMAP connection, reused across tool calls to avoid logging in on every call
         // (Yahoo throttles frequent logins). Calls take turns via imapLock because each one
@@ -1998,9 +1996,92 @@ class YahooMailMCPServer {
         console.error('Yahoo Mail MCP server running on stdio');
     }
 
+    /**
+     * OAuth helper: key for signing tokens, derived from OAUTH_CLIENT_SECRET.
+     * Changing the secret invalidates every issued token.
+     */
+    tokenSigningKey() {
+        return crypto.createHash('sha256').update(`yahoo-mail-mcp token signing:${process.env.OAUTH_CLIENT_SECRET}`).digest();
+    }
+
+    /**
+     * OAuth helper: issue a signed token ("v1.<payload>.<signature>") that expires after ttlSeconds
+     */
+    issueToken(type, clientId, ttlSeconds, scope = 'mcp') {
+        const now = Math.floor(Date.now() / 1000);
+        const payload = Buffer.from(JSON.stringify({
+            typ: type,
+            cid: clientId,
+            scope,
+            iat: now,
+            exp: now + ttlSeconds,
+            jti: crypto.randomBytes(16).toString('hex')
+        })).toString('base64url');
+        const signature = crypto.createHmac('sha256', this.tokenSigningKey()).update(`v1.${payload}`).digest('base64url');
+        return `v1.${payload}.${signature}`;
+    }
+
+    /**
+     * OAuth helper: return the token's payload if the signature, type, client, and expiry are valid; otherwise null
+     */
+    verifyToken(token, expectedType) {
+        if (typeof token !== 'string') return null;
+        const parts = token.split('.');
+        if (parts.length !== 3 || parts[0] !== 'v1') return null;
+
+        const expected = crypto.createHmac('sha256', this.tokenSigningKey()).update(`v1.${parts[1]}`).digest();
+        const actual = Buffer.from(parts[2], 'base64url');
+        if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
+
+        let payload;
+        try {
+            payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        } catch {
+            return null;
+        }
+        if (payload.typ !== expectedType) return null;
+        if (payload.cid !== process.env.OAUTH_CLIENT_ID) return null;
+        if (!Number.isFinite(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+        return payload;
+    }
+
+    /**
+     * OAuth helper: constant-time string comparison (avoids leaking the secret through response timing)
+     */
+    safeEqual(a, b) {
+        const bufA = Buffer.from(String(a ?? ''));
+        const bufB = Buffer.from(String(b ?? ''));
+        return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+    }
+
+    /**
+     * OAuth helper: drop expired authorization codes and used-refresh-token records
+     */
+    pruneOAuthState() {
+        const now = Date.now();
+        for (const [code, data] of this.authCodes) {
+            if (now - data.created_at > 60 * 1000) this.authCodes.delete(code);
+        }
+        for (const [jti, exp] of this.usedRefreshTokens) {
+            if (exp * 1000 <= now) this.usedRefreshTokens.delete(jti);
+        }
+    }
+
     async runSSE() {
         const app = express();
         const port = process.env.PORT || 3000;
+
+        // Refuse to expose the mailbox on the network without OAuth, unless explicitly allowed
+        const oauthConfigured = Boolean(process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET);
+        if (!oauthConfigured && process.env.ALLOW_UNAUTHENTICATED !== 'true') {
+            console.error('[Server] Refusing to start: OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET are not set.');
+            console.error('[Server] Without them, anyone who finds this URL can read and change the mailbox.');
+            console.error('[Server] Set both, or set ALLOW_UNAUTHENTICATED=true for local testing only.');
+            process.exit(1);
+        }
+
+        const accessTokenTtl = Number(process.env.OAUTH_ACCESS_TOKEN_TTL) || 3600;          // 1 hour
+        const refreshTokenTtl = Number(process.env.OAUTH_REFRESH_TOKEN_TTL) || 30 * 86400;  // 30 days
 
         // Log startup configuration
         console.error('[Server] Starting in HTTP mode (Streamable HTTP at /mcp, legacy SSE at /mcp/sse)');
@@ -2057,12 +2138,9 @@ class YahooMailMCPServer {
                 return next();
             }
 
-            // Check if OAuth is configured
-            const oauthConfigured = process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET;
-
+            // Only reachable with ALLOW_UNAUTHENTICATED=true (the server refuses to start otherwise)
             if (!oauthConfigured) {
                 console.error('[Auth] WARNING: OAuth not configured - server is UNSECURED!');
-                console.error('[Auth] Set OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET to secure your server');
                 return next();
             }
 
@@ -2082,8 +2160,8 @@ class YahooMailMCPServer {
 
             const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
-            // Validate token (check if it's in our valid tokens set)
-            if (!this.validTokens || !this.validTokens.has(token)) {
+            // Validate token (signature, client, and expiry)
+            if (!this.verifyToken(token, 'access')) {
                 console.error('[Auth] Invalid or expired access token');
                 return res.status(401).json({
                     error: 'invalid_token',
@@ -2105,7 +2183,7 @@ class YahooMailMCPServer {
                 issuer: baseUrl,
                 authorization_endpoint: `${baseUrl}/oauth/authorize`,
                 token_endpoint: `${baseUrl}/oauth/token`,
-                grant_types_supported: ['authorization_code', 'client_credentials'],
+                grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
                 response_types_supported: ['code'],
                 token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
                 code_challenge_methods_supported: ['S256'],
@@ -2178,7 +2256,7 @@ class YahooMailMCPServer {
             } = req.query;
 
             // Validate client_id
-            if (client_id !== clientId) {
+            if (!clientId || client_id !== clientId) {
                 console.error('[OAuth] Invalid client_id in authorize request');
                 return res.status(400).send('Invalid client_id');
             }
@@ -2212,11 +2290,15 @@ class YahooMailMCPServer {
                 return res.status(400).send('Invalid redirect_uri');
             }
 
-            // Generate authorization code
-            const authCode = Buffer.from(`${client_id}:${Date.now()}:${Math.random()}`).toString('base64');
+            // PKCE: only S256 is supported
+            if (code_challenge && code_challenge_method && code_challenge_method !== 'S256') {
+                console.error('[OAuth] Unsupported code_challenge_method:', code_challenge_method);
+                return res.status(400).send('Unsupported code_challenge_method (use S256)');
+            }
 
-            // Store auth code with PKCE challenge (in-memory - use Redis/DB in production)
-            if (!this.authCodes) this.authCodes = new Map();
+            // Generate a random authorization code (valid for 60 seconds, usable once)
+            this.pruneOAuthState();
+            const authCode = crypto.randomBytes(32).toString('base64url');
             this.authCodes.set(authCode, {
                 client_id,
                 redirect_uri,
@@ -2256,15 +2338,18 @@ class YahooMailMCPServer {
             const authHeader = req.headers.authorization;
 
             if (authHeader && authHeader.startsWith('Basic ')) {
+                // Split on the first ':' only; the secret itself may contain ':'
                 const credentials = Buffer.from(authHeader.substring(6), 'base64').toString();
-                [reqClientId, reqClientSecret] = credentials.split(':');
+                const sep = credentials.indexOf(':');
+                reqClientId = sep === -1 ? credentials : credentials.slice(0, sep);
+                reqClientSecret = sep === -1 ? '' : credentials.slice(sep + 1);
             } else {
                 reqClientId = req.body?.client_id;
                 reqClientSecret = req.body?.client_secret;
             }
 
             // Validate credentials
-            if (reqClientId !== clientId || reqClientSecret !== clientSecret) {
+            if (!this.safeEqual(reqClientId, clientId) || !this.safeEqual(reqClientSecret, clientSecret)) {
                 console.error('[OAuth] Authentication failed - invalid client credentials');
                 return res.status(401).json({
                     error: 'invalid_client',
@@ -2274,74 +2359,81 @@ class YahooMailMCPServer {
 
             const grantType = req.body?.grant_type;
 
+            const tokenResponse = (scope, withRefresh) => {
+                const body = {
+                    access_token: this.issueToken('access', clientId, accessTokenTtl, scope),
+                    token_type: 'Bearer',
+                    expires_in: accessTokenTtl,
+                    scope
+                };
+                if (withRefresh) body.refresh_token = this.issueToken('refresh', clientId, refreshTokenTtl, scope);
+                res.set('Cache-Control', 'no-store');
+                return res.json(body);
+            };
+            const invalidGrant = (description) => res.status(400).json({ error: 'invalid_grant', error_description: description });
+
+            this.pruneOAuthState();
+
             // Handle Authorization Code Grant (with PKCE)
             if (grantType === 'authorization_code') {
-                const { code, redirect_uri, code_verifier } = req.body;
-
+                const { code, redirect_uri, code_verifier } = req.body || {};
                 console.error('[OAuth] Authorization code grant - validating code');
 
-                // Validate authorization code
-                if (!this.authCodes || !this.authCodes.has(code)) {
+                const authData = code ? this.authCodes.get(code) : undefined;
+                if (!authData) {
                     console.error('[OAuth] Invalid or expired authorization code');
-                    return res.status(400).json({
-                        error: 'invalid_grant',
-                        error_description: 'Invalid or expired authorization code'
-                    });
+                    return invalidGrant('Invalid or expired authorization code');
                 }
+                this.authCodes.delete(code);  // one-time use, even if the checks below fail
 
-                const authData = this.authCodes.get(code);
-
-                // Validate PKCE code verifier
+                if (Date.now() - authData.created_at > 60 * 1000) {
+                    return invalidGrant('Authorization code expired');
+                }
+                if (redirect_uri !== undefined && redirect_uri !== authData.redirect_uri) {
+                    return invalidGrant('redirect_uri does not match the authorization request');
+                }
                 if (authData.code_challenge) {
-                    const crypto = await import('crypto');
+                    if (typeof code_verifier !== 'string' || code_verifier.length === 0) {
+                        return invalidGrant('code_verifier is required');
+                    }
                     const hash = crypto.createHash('sha256').update(code_verifier).digest('base64url');
-                    if (hash !== authData.code_challenge) {
+                    if (!this.safeEqual(hash, authData.code_challenge)) {
                         console.error('[OAuth] PKCE validation failed');
-                        return res.status(400).json({
-                            error: 'invalid_grant',
-                            error_description: 'PKCE validation failed'
-                        });
+                        return invalidGrant('PKCE validation failed');
                     }
                 }
 
-                // Delete used auth code (one-time use)
-                this.authCodes.delete(code);
-
-                // Generate access token
-                const accessToken = Buffer.from(`${reqClientId}:${Date.now()}:${Math.random()}`).toString('base64');
-                this.validTokens.add(accessToken);
-
-                console.error('[OAuth] Access token generated from authorization code');
-
-                return res.json({
-                    access_token: accessToken,
-                    token_type: 'Bearer',
-                    expires_in: 3600,
-                    scope: authData.scope || 'mcp'
-                });
+                console.error('[OAuth] Access and refresh tokens issued from authorization code');
+                return tokenResponse(authData.scope || 'mcp', true);
             }
 
-            // Handle Client Credentials Grant
+            // Handle Refresh Token Grant (each refresh token works once and is replaced)
+            if (grantType === 'refresh_token') {
+                const payload = this.verifyToken(req.body?.refresh_token, 'refresh');
+                if (!payload) {
+                    return invalidGrant('Invalid or expired refresh token');
+                }
+                if (this.usedRefreshTokens.has(payload.jti)) {
+                    console.error('[OAuth] Refresh token reuse detected');
+                    return invalidGrant('Refresh token has already been used');
+                }
+                this.usedRefreshTokens.set(payload.jti, payload.exp);
+
+                console.error('[OAuth] Tokens refreshed');
+                return tokenResponse(payload.scope || 'mcp', true);
+            }
+
+            // Handle Client Credentials Grant (no refresh token; the client can simply request a new token)
             if (grantType === 'client_credentials') {
-                // Generate access token
-                const accessToken = Buffer.from(`${clientId}:${Date.now()}:${Math.random()}`).toString('base64');
-                this.validTokens.add(accessToken);
-
-                console.error('[OAuth] Access token generated via client credentials');
-
-                return res.json({
-                    access_token: accessToken,
-                    token_type: 'Bearer',
-                    expires_in: 3600,
-                    scope: 'mcp'
-                });
+                console.error('[OAuth] Access token issued via client credentials');
+                return tokenResponse('mcp', false);
             }
 
             // Unsupported grant type
             console.error('[OAuth] Unsupported grant type:', grantType);
             res.status(400).json({
                 error: 'unsupported_grant_type',
-                error_description: 'Supported grant types: authorization_code, client_credentials'
+                error_description: 'Supported grant types: authorization_code, refresh_token, client_credentials'
             });
         });
 
