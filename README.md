@@ -16,6 +16,37 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
 - **Offline test suite**: `npm test` runs 53 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
+## Where Your Credentials Live (Read This First)
+
+This server needs your Yahoo **app password**: a 16-character password Yahoo generates for one app (like a personal access token). It gives **full mailbox access** (read, move, delete, drafts), bypasses 2-step verification, and **never expires** until you revoke it. Where it lives depends on how you run the server:
+
+| Setup | Who can see the app password | Who can see your email content | Use it from |
+|---|---|---|---|
+| **Local** (recommended): Claude Desktop, Cursor, VS Code, Codex CLI start the server on your computer | Only your computer (in `.env`) | Only your computer | That computer's desktop apps |
+| **Hosted** (optional): Render, Fly.io, a VPS, etc. | **The hosting provider** and anyone with access to your hosting account | Passes through the host's servers while tools run | Anywhere: Claude.ai web/mobile, ChatGPT, other remote MCP clients |
+
+**Local setup:** the server runs as a local process, talks to the app through a pipe (stdio), and opens no network port. Your credentials never leave your machine. No sign-in page is needed because nothing is reachable from outside.
+
+**Hosted setup:** the server must hold the app password in readable form to log in to Yahoo, so **you are trusting the host**. The sign-in page, MFA, and OAuth protect who can *use* your server; they don't hide anything from the host itself. What the host holds:
+
+| Setting | Stored on the host as | Notes |
+|---|---|---|
+| `YAHOO_APP_PASSWORD` | Readable | Required to log in to Yahoo |
+| `OAUTH_CLIENT_SECRET` | Readable | Signs access tokens; changing it logs out every app |
+| `AUTH_TOTP_SECRET` | Readable | Required to check authenticator codes |
+| Your sign-in password | **Hash only** (scrypt) | The real password is never stored anywhere |
+
+**If you host it:**
+1. **Create a separate app password just for the host** (e.g. named `MCP Render`), so you can revoke it without affecting anything else.
+2. **Turn on 2-step verification for your hosting and GitHub accounts.** Someone breaking into those is a more likely risk than the host itself.
+3. Store every credential as a **secret** environment variable, never in the repository.
+4. **Revoke the app password** at [Yahoo account security](https://login.yahoo.com/account/security) whenever you stop hosting or suspect a leak, and change `OAUTH_CLIENT_SECRET` to disconnect every app immediately.
+5. Only host if you need web, mobile, or ChatGPT access. If you only use desktop apps, stay local.
+
+**Logging:** the server logs request paths, OAuth events, and connection errors. It is written not to log passwords, tokens, secrets, email addresses, or email content.
+
+**Never sent, never shared:** the server has no send-mail capability (drafts only), and each deployment serves one mailbox: yours. Nobody else's credentials are involved, and you never need to give yours to anyone else's server.
+
 ## Features
 
 - **Secure OAuth 2.0 Authentication**: Protect your remote MCP server with OAuth 2.0 authorization code flow with PKCE
@@ -274,6 +305,8 @@ curl http://localhost:3000/mcp/sse
 ```
 
 ## Deploying to Render.com
+
+> **Before you host:** the host will hold your Yahoo app password in readable form. Read [Where Your Credentials Live](#where-your-credentials-live-read-this-first), and use a separate, revocable app password for the host.
 
 ### Step 1: Prepare Your Repository
 
@@ -1293,7 +1326,7 @@ A: Currently, this server is configured for Yahoo Mail. To support other provide
 
 ### Q: Is this safe to use with my email account?
 
-A: The server uses app-specific passwords (not your main password) and never sends email on your behalf; it only saves drafts. Delete operations move emails to Trash (recoverable). The one permanent removal is in `update_draft`, which removes the previous version of the draft being revised (and only that draft).
+A: See [Where Your Credentials Live](#where-your-credentials-live-read-this-first) for exactly who can see what in local and hosted setups. In short: The server uses app-specific passwords (not your main password) and never sends email on your behalf; it only saves drafts. Delete operations move emails to Trash (recoverable). The one permanent removal is in `update_draft`, which removes the previous version of the draft being revised (and only that draft).
 
 ### Q: How much does it cost to run on Render?
 
