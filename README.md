@@ -16,6 +16,17 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
 - **Offline test suite**: `npm test` runs 53 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
+## Project Status
+
+| Area | Status |
+|---|---|
+| **Local mode** (stdio) with Claude Desktop | ✅ Tested against a real Yahoo mailbox: folders, search, multi-email reads, attachment download, new/reply/revised drafts, bulk flag/unflag, error handling |
+| Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (53 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
+
+Feedback and issue reports from hosted setups are very welcome.
+
 ## Where Your Credentials Live (Read This First)
 
 This server needs your Yahoo **app password**: a 16-character password Yahoo generates for one app (like a personal access token). It gives **full mailbox access** (read, move, delete, drafts), bypasses 2-step verification, and **never expires** until you revoke it. Where it lives depends on how you run the server:
@@ -306,6 +317,8 @@ curl http://localhost:3000/mcp/sse
 
 ## Deploying to Render.com
 
+> **Experimental:** hosted mode passes the offline tests but hasn't been tested end-to-end on Render yet. See [Project Status](#project-status).
+>
 > **Before you host:** the host will hold your Yahoo app password in readable form. Read [Where Your Credentials Live](#where-your-credentials-live-read-this-first), and use a separate, revocable app password for the host.
 
 ### Step 1: Prepare Your Repository
