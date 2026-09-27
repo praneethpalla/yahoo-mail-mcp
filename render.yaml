@@ -32,6 +32,14 @@ services:
         sync: false  # Required: the server refuses to start without OAuth (openssl rand -hex 16)
       - key: OAUTH_CLIENT_SECRET
         sync: false  # Required (openssl rand -hex 32); changing it logs out every connected client
+      - key: AUTH_USERNAME
+        sync: false  # Required: sign-in name (npm run setup-login)
+      - key: AUTH_PASSWORD_HASH
+        sync: false  # Required: scrypt hash from npm run setup-login (never the plain password)
+      - key: AUTH_TOTP_SECRET
+        sync: false  # Recommended: authenticator secret from npm run setup-login
+      - key: TRUST_PROXY
+        value: "1"   # Render runs behind one proxy; makes sign-in lockouts per client address
 
     # Health check configuration
     healthCheckPath: /health

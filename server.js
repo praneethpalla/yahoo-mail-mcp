@@ -21,6 +21,9 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import crypto from 'crypto';
+import {
+    verifyPassword, verifyTotp, base32Decode, signFormToken, verifyFormToken, renderLoginPage, renderErrorPage
+} from './auth.js';
 import os from 'os';
 import fs from 'fs/promises';
 
@@ -42,6 +45,8 @@ class YahooMailMCPServer {
         // restarts. Only these short-lived items are kept in memory:
         this.authCodes = new Map();          // authorization codes, valid for 60 seconds
         this.usedRefreshTokens = new Map();  // refresh token id -> expiry, so each refresh token works once
+        this.loginFailures = new Map();      // client IP -> { count, first, lockedUntil } for brute-force lockout
+        this.lastTotpStep = -1;              // last accepted authenticator time step, so a code can't be reused
 
         // Shared IMAP connection, reused across tool calls to avoid logging in on every call
         // (Yahoo throttles frequent logins). Calls take turns via imapLock because each one
@@ -2055,6 +2060,55 @@ class YahooMailMCPServer {
     }
 
     /**
+     * OAuth helper: validate an authorization request. Returns { error } or { redirectHost, redirectOrigin }.
+     */
+    validateAuthorizeRequest({ response_type, client_id, redirect_uri, code_challenge, code_challenge_method }) {
+        const clientId = process.env.OAUTH_CLIENT_ID;
+        if (!clientId || client_id !== clientId) return { error: 'Invalid client_id' };
+        if (response_type !== 'code') return { error: 'Unsupported response_type' };
+
+        // Validate redirect_uri by exact hostname (a substring check would accept e.g. https://evil.example/?claude.ai).
+        // OAUTH_REDIRECT_HOSTS adds other MCP clients, e.g. "chatgpt.com"; subdomains of a listed host are allowed.
+        const allowedHosts = (process.env.OAUTH_REDIRECT_HOSTS || 'claude.ai,claude.com')
+            .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+        let parsed = null;
+        try {
+            parsed = new URL(redirect_uri);
+        } catch {
+            return { error: 'Invalid redirect_uri' };
+        }
+        const host = parsed.hostname.toLowerCase();
+        const isLocal = host === 'localhost' || host === '127.0.0.1';
+        const isAllowed = (isLocal && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) ||
+            (parsed.protocol === 'https:' && allowedHosts.some(h => host === h || host.endsWith(`.${h}`)));
+        if (!isAllowed) return { error: 'Invalid redirect_uri' };
+
+        // PKCE: only S256 is supported
+        if (code_challenge && code_challenge_method && code_challenge_method !== 'S256') {
+            return { error: 'Unsupported code_challenge_method (use S256)' };
+        }
+        return { redirectHost: parsed.host, redirectOrigin: parsed.origin };
+    }
+
+    /**
+     * Login lockout: 5 failed sign-ins from one address within 15 minutes locks it out for 15 minutes
+     */
+    loginLockedUntil(ip) {
+        const entry = this.loginFailures.get(ip);
+        return entry && entry.lockedUntil > Date.now() ? entry.lockedUntil : 0;
+    }
+
+    recordLoginFailure(ip) {
+        const now = Date.now();
+        const windowMs = 15 * 60 * 1000;
+        let entry = this.loginFailures.get(ip);
+        if (!entry || now - entry.first > windowMs) entry = { count: 0, first: now, lockedUntil: 0 };
+        entry.count++;
+        if (entry.count >= 5) entry.lockedUntil = now + windowMs;
+        this.loginFailures.set(ip, entry);
+    }
+
+    /**
      * OAuth helper: drop expired authorization codes and used-refresh-token records
      */
     pruneOAuthState() {
@@ -2065,19 +2119,47 @@ class YahooMailMCPServer {
         for (const [jti, exp] of this.usedRefreshTokens) {
             if (exp * 1000 <= now) this.usedRefreshTokens.delete(jti);
         }
+        for (const [ip, entry] of this.loginFailures) {
+            if (entry.lockedUntil <= now && now - entry.first > 15 * 60 * 1000) this.loginFailures.delete(ip);
+        }
     }
 
     async runSSE() {
         const app = express();
         const port = process.env.PORT || 3000;
 
-        // Refuse to expose the mailbox on the network without OAuth, unless explicitly allowed
+        // Refuse to expose the mailbox on the network without OAuth and a sign-in, unless explicitly allowed
         const oauthConfigured = Boolean(process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET);
-        if (!oauthConfigured && process.env.ALLOW_UNAUTHENTICATED !== 'true') {
-            console.error('[Server] Refusing to start: OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET are not set.');
+        const loginConfigured = Boolean(process.env.AUTH_USERNAME && process.env.AUTH_PASSWORD_HASH);
+        const allowUnauthenticated = process.env.ALLOW_UNAUTHENTICATED === 'true';
+        if ((!oauthConfigured || !loginConfigured) && !allowUnauthenticated) {
+            console.error('[Server] Refusing to start: remote access needs OAuth and a sign-in.');
+            if (!oauthConfigured) console.error('[Server] - Set OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET.');
+            if (!loginConfigured) console.error('[Server] - Set AUTH_USERNAME and AUTH_PASSWORD_HASH (run: npm run setup-login).');
             console.error('[Server] Without them, anyone who finds this URL can read and change the mailbox.');
-            console.error('[Server] Set both, or set ALLOW_UNAUTHENTICATED=true for local testing only.');
+            console.error('[Server] For local testing only, ALLOW_UNAUTHENTICATED=true skips this check.');
             process.exit(1);
+        }
+        if (loginConfigured && !process.env.AUTH_PASSWORD_HASH.startsWith('scrypt$')) {
+            console.error('[Server] Refusing to start: AUTH_PASSWORD_HASH must be a hash from "npm run setup-login", not a plain password.');
+            process.exit(1);
+        }
+        const mfaEnabled = Boolean(process.env.AUTH_TOTP_SECRET);
+        if (mfaEnabled) {
+            try {
+                if (base32Decode(process.env.AUTH_TOTP_SECRET).length < 10) throw new Error('too short');
+            } catch (err) {
+                console.error(`[Server] Refusing to start: AUTH_TOTP_SECRET is not a valid base32 secret (${err.message}).`);
+                process.exit(1);
+            }
+        } else if (loginConfigured) {
+            console.error('[Server] WARNING: AUTH_TOTP_SECRET is not set; sign-in uses a password only. Run "npm run setup-login" to add an authenticator code.');
+        }
+        const allowClientCredentials = process.env.ALLOW_CLIENT_CREDENTIALS === 'true';
+
+        // Behind a proxy (e.g. Render), trust its X-Forwarded-For so lockouts apply per client address
+        if (process.env.TRUST_PROXY) {
+            app.set('trust proxy', /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
         }
 
         const accessTokenTtl = Number(process.env.OAUTH_ACCESS_TOKEN_TTL) || 3600;          // 1 hour
@@ -2108,8 +2190,8 @@ class YahooMailMCPServer {
                 return next();
             }
 
-            // OAuth token endpoint needs both JSON and URL-encoded support
-            if (req.path === '/oauth/token') {
+            // OAuth token endpoint and the sign-in form need both JSON and URL-encoded support
+            if (req.path === '/oauth/token' || req.path === '/oauth/authorize') {
                 // Parse both JSON and URL-encoded bodies
                 express.json()(req, res, (err) => {
                     if (err) return next(err);
@@ -2183,7 +2265,7 @@ class YahooMailMCPServer {
                 issuer: baseUrl,
                 authorization_endpoint: `${baseUrl}/oauth/authorize`,
                 token_endpoint: `${baseUrl}/oauth/token`,
-                grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
+                grant_types_supported: ['authorization_code', 'refresh_token', ...(allowClientCredentials ? ['client_credentials'] : [])],
                 response_types_supported: ['code'],
                 token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
                 code_challenge_methods_supported: ['S256'],
@@ -2239,83 +2321,111 @@ class YahooMailMCPServer {
             res.json(getProtectedResourceMetadata(req, '/mcp/sse'));
         });
 
-        // OAuth Authorization Endpoint (Authorization Code Flow)
+        // Security headers for the sign-in pages: no framing (clickjacking), no caching, no external resources.
+        // form-action must include the client's origin because the browser follows the redirect after sign-in.
+        const setLoginPageHeaders = (res, redirectOrigin = '') => {
+            res.set({
+                'Content-Security-Policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${redirectOrigin}; frame-ancestors 'none'; base-uri 'none'`,
+                'X-Frame-Options': 'DENY',
+                'Cache-Control': 'no-store',
+                'Referrer-Policy': 'no-referrer',
+                'X-Content-Type-Options': 'nosniff'
+            });
+        };
+        const formKey = () => crypto.createHmac('sha256', this.tokenSigningKey()).update('login-form').digest();
+        const authorizeFields = ['response_type', 'client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'scope'];
+
+        // OAuth Authorization Endpoint: validate the request, then show the sign-in page
         app.get('/oauth/authorize', (req, res) => {
             console.error('[OAuth] Authorization request received');
-            console.error('[OAuth] Query params:', JSON.stringify(req.query).substring(0, 200));
-
-            const clientId = process.env.OAUTH_CLIENT_ID;
-            const {
-                response_type,
-                client_id,
-                redirect_uri,
-                state,
-                code_challenge,
-                code_challenge_method,
-                scope
-            } = req.query;
-
-            // Validate client_id
-            if (!clientId || client_id !== clientId) {
-                console.error('[OAuth] Invalid client_id in authorize request');
-                return res.status(400).send('Invalid client_id');
+            const params = {};
+            for (const field of authorizeFields) {
+                if (typeof req.query[field] === 'string') params[field] = req.query[field];
             }
 
-            // Validate response_type
-            if (response_type !== 'code') {
-                console.error('[OAuth] Unsupported response_type:', response_type);
-                return res.status(400).send('Unsupported response_type');
+            const check = this.validateAuthorizeRequest(params);
+            setLoginPageHeaders(res, check.redirectOrigin);
+            if (check.error) {
+                console.error('[OAuth] Rejected authorization request:', check.error);
+                return res.status(400).type('html').send(renderErrorPage(check.error));
             }
 
-            // Validate redirect_uri by exact hostname (a substring check would accept e.g. https://evil.example/?claude.ai).
-            // OAUTH_REDIRECT_HOSTS adds other MCP clients, e.g. "chatgpt.com"; subdomains of a listed host are allowed.
-            const allowedHosts = (process.env.OAUTH_REDIRECT_HOSTS || 'claude.ai,claude.com')
-                .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
-            let redirectHost = null;
-            let redirectProtocol = null;
-            try {
-                const parsed = new URL(redirect_uri);
-                redirectHost = parsed.hostname.toLowerCase();
-                redirectProtocol = parsed.protocol;
-            } catch {
-                // invalid URL; rejected below
+            res.type('html').send(renderLoginPage({
+                formToken: signFormToken(params, formKey()),
+                redirectHost: check.redirectHost,
+                mfaEnabled
+            }));
+        });
+
+        // Sign-in form submission: check username, password, and authenticator code, then issue a code
+        app.post('/oauth/authorize', async (req, res) => {
+            const params = verifyFormToken(req.body?.request, formKey());
+            if (!params) {
+                setLoginPageHeaders(res);
+                return res.status(400).type('html').send(renderErrorPage('This sign-in page has expired or was modified.'));
             }
-            const isLocal = redirectHost === 'localhost' || redirectHost === '127.0.0.1';
-            const isAllowed = redirectHost && (
-                (isLocal && (redirectProtocol === 'http:' || redirectProtocol === 'https:')) ||
-                (redirectProtocol === 'https:' && allowedHosts.some(h => redirectHost === h || redirectHost.endsWith(`.${h}`)))
-            );
-            if (!isAllowed) {
-                console.error('[OAuth] Invalid redirect_uri:', redirect_uri);
-                return res.status(400).send('Invalid redirect_uri');
+            const check = this.validateAuthorizeRequest(params);
+            setLoginPageHeaders(res, check.redirectOrigin);
+            if (check.error) {
+                return res.status(400).type('html').send(renderErrorPage(check.error));
             }
 
-            // PKCE: only S256 is supported
-            if (code_challenge && code_challenge_method && code_challenge_method !== 'S256') {
-                console.error('[OAuth] Unsupported code_challenge_method:', code_challenge_method);
-                return res.status(400).send('Unsupported code_challenge_method (use S256)');
+            const ip = req.ip || 'unknown';
+            const username = typeof req.body?.username === 'string' ? req.body.username : '';
+            const showForm = (status, error) => res.status(status).type('html').send(renderLoginPage({
+                formToken: signFormToken(params, formKey()),
+                redirectHost: check.redirectHost,
+                mfaEnabled,
+                error,
+                username
+            }));
+
+            this.pruneOAuthState();
+            const lockedUntil = this.loginLockedUntil(ip);
+            if (lockedUntil) {
+                const minutes = Math.ceil((lockedUntil - Date.now()) / 60000);
+                console.error('[OAuth] Sign-in blocked (locked out):', ip);
+                return showForm(429, `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+            }
+
+            if (!loginConfigured) {
+                // Only reachable with ALLOW_UNAUTHENTICATED=true
+                console.error('[OAuth] WARNING: sign-in skipped because AUTH_USERNAME/AUTH_PASSWORD_HASH are not set');
+            } else {
+                const userOk = this.safeEqual(username, process.env.AUTH_USERNAME);
+                const passwordOk = verifyPassword(typeof req.body?.password === 'string' ? req.body.password : '', process.env.AUTH_PASSWORD_HASH);
+                const totpStep = mfaEnabled ? verifyTotp(process.env.AUTH_TOTP_SECRET, typeof req.body?.totp === 'string' ? req.body.totp : '') : 0;
+                const totpOk = !mfaEnabled || (totpStep !== null && totpStep > this.lastTotpStep);
+
+                if (!userOk || !passwordOk || !totpOk) {
+                    this.recordLoginFailure(ip);
+                    console.error('[OAuth] Failed sign-in from:', ip);
+                    await new Promise(resolve => setTimeout(resolve, 400));  // slow down guessing
+                    const reused = userOk && passwordOk && mfaEnabled && totpStep !== null;
+                    return showForm(401, reused
+                        ? 'That authenticator code was already used. Wait for the next code.'
+                        : `Incorrect username, password${mfaEnabled ? ', or authenticator code' : ''}.`);
+                }
+                if (mfaEnabled) this.lastTotpStep = totpStep;
+                this.loginFailures.delete(ip);
             }
 
             // Generate a random authorization code (valid for 60 seconds, usable once)
-            this.pruneOAuthState();
             const authCode = crypto.randomBytes(32).toString('base64url');
             this.authCodes.set(authCode, {
-                client_id,
-                redirect_uri,
-                code_challenge,
-                code_challenge_method,
-                scope,
+                client_id: params.client_id,
+                redirect_uri: params.redirect_uri,
+                code_challenge: params.code_challenge,
+                code_challenge_method: params.code_challenge_method,
+                scope: params.scope,
                 created_at: Date.now()
             });
 
-            console.error('[OAuth] Authorization code generated, redirecting to:', redirect_uri);
-
-            // Redirect back to Claude with authorization code
-            const redirectUrl = new URL(redirect_uri);
+            console.error('[OAuth] Sign-in successful; redirecting to:', check.redirectHost);
+            const redirectUrl = new URL(params.redirect_uri);
             redirectUrl.searchParams.append('code', authCode);
-            if (state) redirectUrl.searchParams.append('state', state);
-
-            res.redirect(redirectUrl.toString());
+            if (params.state) redirectUrl.searchParams.append('state', params.state);
+            res.redirect(302, redirectUrl.toString());
         });
 
         // OAuth Token Endpoint (supports both Authorization Code and Client Credentials flows)
@@ -2423,8 +2533,9 @@ class YahooMailMCPServer {
                 return tokenResponse(payload.scope || 'mcp', true);
             }
 
-            // Handle Client Credentials Grant (no refresh token; the client can simply request a new token)
-            if (grantType === 'client_credentials') {
+            // Handle Client Credentials Grant (no refresh token; the client can simply request a new token).
+            // Off by default: it skips the sign-in page, so only enable it for trusted machine-to-machine use.
+            if (grantType === 'client_credentials' && allowClientCredentials) {
                 console.error('[OAuth] Access token issued via client credentials');
                 return tokenResponse('mcp', false);
             }
@@ -2433,7 +2544,7 @@ class YahooMailMCPServer {
             console.error('[OAuth] Unsupported grant type:', grantType);
             res.status(400).json({
                 error: 'unsupported_grant_type',
-                error_description: 'Supported grant types: authorization_code, refresh_token, client_credentials'
+                error_description: `Supported grant types: authorization_code, refresh_token${allowClientCredentials ? ', client_credentials' : ''}`
             });
         });
 

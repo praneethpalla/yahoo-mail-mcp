@@ -12,8 +12,9 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
+- **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 40 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 53 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Features
 
@@ -338,14 +339,21 @@ git push -u origin main
    | Key | Value | How to Generate |
    |-----|-------|-----------------|
    | `NODE_ENV` | `production` | - |
-   | `TRANSPORT_MODE` | `sse` | - |
+   | `TRANSPORT_MODE` | `http` | - |
+   | `TRUST_PROXY` | `1` | - (Render runs behind one proxy; needed for per-address sign-in lockouts) |
    | `YAHOO_EMAIL` | `your.email@yahoo.com` | Your Yahoo email address |
    | `YAHOO_APP_PASSWORD` | `your16charpassword` | See "Get Yahoo Mail App Password" section |
    | `OAUTH_CLIENT_ID` | `32-char-hex-string` | Run: `openssl rand -hex 16` |
    | `OAUTH_CLIENT_SECRET` | `64-char-hex-string` | Run: `openssl rand -hex 32` |
+   | `AUTH_USERNAME` | your sign-in name | Run: `npm run setup-login -- --out ~/yahoo-mcp-login.txt` |
+   | `AUTH_PASSWORD_HASH` | `scrypt$...` | From the same file (a hash, never the password itself) |
+   | `AUTH_TOTP_SECRET` | base32 secret | From the same file; also add it to your authenticator app |
+
+   `npm run setup-login` asks for a username and password (hidden while typing), creates an authenticator secret, and writes all three `AUTH_*` values to the file you choose (readable only by you). Add the secret to Google Authenticator, 1Password, Authy, or similar via "Enter a setup key", then delete the file once everything is copied.
 
    **Important**:
-   - Mark `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, `OAUTH_CLIENT_ID`, and `OAUTH_CLIENT_SECRET` as "Secret"
+   - Mark `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `AUTH_PASSWORD_HASH`, and `AUTH_TOTP_SECRET` as "Secret"
+   - The server refuses to start in HTTP mode without the OAuth and `AUTH_USERNAME`/`AUTH_PASSWORD_HASH` settings
    - `PORT` is automatically set by Render, don't add it manually
    - Save the OAuth credentials - you'll need them to configure Claude Desktop
 
@@ -389,8 +397,9 @@ git push -u origin main
      - **OAuth Client Secret**: The value from `OAUTH_CLIENT_SECRET` environment variable
 
 5. **Save and Test**
-   - Click "Add" or "Save"
-   - Claude Desktop will authenticate using OAuth 2.0
+   - Click "Add" or "Save", then "Connect"
+   - A sign-in page opens: enter your username, password, and the 6-digit code from your authenticator app
+   - Claude receives a token and refreshes it automatically; you only sign in again if the connection goes unused for 30 days
    - If successful, you'll see the connector active
    - You can now use Yahoo Mail tools in your conversations!
 
@@ -532,14 +541,19 @@ docker ps
 | `PORT` | No | `3000` | Port for HTTP mode (auto-set by Render) |
 | `OAUTH_ACCESS_TOKEN_TTL` | No | `3600` | Access token lifetime in seconds |
 | `OAUTH_REFRESH_TOKEN_TTL` | No | `2592000` | Refresh token lifetime in seconds (30 days). Each refresh token can be used once and is replaced |
-| `ALLOW_UNAUTHENTICATED` | No | - | Set to `true` to run HTTP mode without OAuth. **Local testing only**: anyone who can reach the server can read and change the mailbox |
+| `AUTH_USERNAME` | Yes (Remote) | - | Username for the sign-in page |
+| `AUTH_PASSWORD_HASH` | Yes (Remote) | - | scrypt hash of the sign-in password, from `npm run setup-login` (plain passwords are rejected) |
+| `AUTH_TOTP_SECRET` | Recommended (Remote) | - | Base32 authenticator secret from `npm run setup-login`; when set, sign-in also asks for a 6-digit code |
+| `TRUST_PROXY` | No | - | Express "trust proxy" setting. Set to `1` on Render so sign-in lockouts apply per client address. Don't set it when the server is reached directly, or clients could fake their address |
+| `ALLOW_CLIENT_CREDENTIALS` | No | - | Set to `true` to allow the `client_credentials` grant, which skips the sign-in page. Only for trusted machine-to-machine use |
+| `ALLOW_UNAUTHENTICATED` | No | - | Set to `true` to run HTTP mode without OAuth or a sign-in. **Local testing only**: anyone who can reach the server can read and change the mailbox |
 | `OAUTH_REDIRECT_HOSTS` | No | `claude.ai,claude.com` | Hostnames allowed as OAuth redirect targets (https only; subdomains allowed; localhost is always allowed). Add other clients, e.g. `chatgpt.com` |
 | `DRAFTS_FOLDER` | No | auto-detected | Drafts folder name. Normally detected from the server's `\Drafts` folder flag (Yahoo: `Draft`) |
 | `IMAP_IDLE_MS` | No | `300000` | Log out of the shared IMAP connection after this many milliseconds without use |
 | `ENV_FILE` | No | `.env` | Env file to load, relative to `server.js` (e.g. `.env.test` for a test account) |
 | `NODE_ENV` | No | `development` | Environment: `development` or `production` |
 
-**Note**: `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` are only required for remote deployments (Render.com); HTTP mode refuses to start without them. Local stdio mode doesn't use OAuth.
+**Note**: The OAuth and `AUTH_*` settings are only required for remote deployments (Render.com); HTTP mode refuses to start without them. Local stdio mode doesn't use OAuth or a sign-in.
 
 ## Available npm Scripts
 
@@ -557,6 +571,7 @@ docker ps
 | `npm run test:health` | Test health endpoint | ✅ |
 | `npm run test:sse` | Test SSE endpoint | ✅ |
 | `npm test` | Run the offline test suite (no Yahoo logins) | ✅ |
+| `npm run setup-login` | Create sign-in settings (username, password hash, authenticator secret) | ✅ |
 
 ## Project Structure
 
@@ -572,6 +587,8 @@ yahoo-mail-mcp-server/
 ├── .dockerignore            # Files to exclude from Docker build
 ├── .gitignore               # Files to exclude from git
 ├── .gitattributes           # Git line ending configuration
+├── auth.js                  # Sign-in helpers: password hashing, TOTP, login page
+├── scripts/setup-login.js   # Creates the AUTH_* sign-in settings
 ├── test/                    # Offline tests (node --test), fake IMAP servers
 └── README.md                # This file
 ```
@@ -581,6 +598,10 @@ yahoo-mail-mcp-server/
 1. **OAuth 2.0 Protection** (Remote Deployments)
    - Server requires OAuth 2.0 authentication for all MCP requests
    - Uses authorization code flow with PKCE (Proof Key for Code Exchange, S256)
+   - Connecting an app requires signing in on the server's own page: username, password, and (recommended) a 6-digit authenticator code (TOTP, RFC 6238)
+   - The password is stored only as a scrypt hash; authenticator codes are single-use; 5 failed sign-ins from one address lock it out for 15 minutes
+   - The sign-in page can't be framed (clickjacking), isn't cached, loads nothing external, and its hidden fields are signed so they can't be altered
+   - The `client_credentials` grant (no sign-in) is off unless `ALLOW_CLIENT_CREDENTIALS=true`
    - Only clients with correct credentials can access your emails
    - Access tokens are signed (HMAC-SHA256, key derived from `OAUTH_CLIENT_SECRET`) and expire after 1 hour; clients renew them with single-use refresh tokens (30 days) without asking the user to log in again
    - Tokens need no server-side storage, so they keep working across restarts and Render sleep
@@ -1199,6 +1220,8 @@ MIT License. See the [LICENSE](LICENSE) file. Original work © jtokib; modificat
 - Message bodies are buffered as bytes, so binary content isn't corrupted
 
 **Security:**
+- Sign-in page for OAuth authorization: previously `/oauth/authorize` issued a code to anyone without asking. It now requires a username, password (scrypt hash), and optional authenticator code (TOTP), with single-use codes and a 15-minute lockout after 5 failures
+- `client_credentials` grant is off by default (`ALLOW_CLIENT_CREDENTIALS=true` to enable)
 - OAuth `redirect_uri` is checked by exact hostname over https. The previous substring check accepted URLs like `https://evil.example/?claude.ai`
 - Access tokens were never expired (despite `expires_in: 3600`), were stored only in memory (lost on every restart), and were built from `Math.random()` with the client ID in plain base64. They are now signed, expiring tokens with random IDs, plus single-use refresh tokens (`refresh_token` grant)
 - Authorization codes are random (`crypto.randomBytes`), expire after 60 seconds, and must match the original `redirect_uri`; a missing PKCE verifier returns an error instead of crashing

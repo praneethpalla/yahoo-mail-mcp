@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { hashPassword } from '../auth.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 38000 + Math.floor(Math.random() * 1000);
@@ -28,7 +29,10 @@ before(async () => {
             YAHOO_APP_PASSWORD: 'dummy',
             OAUTH_CLIENT_ID: 'test-client',
             OAUTH_CLIENT_SECRET: 'test-secret',
-            OAUTH_REDIRECT_HOSTS: 'claude.ai,claude.com,chatgpt.com'
+            OAUTH_REDIRECT_HOSTS: 'claude.ai,claude.com,chatgpt.com',
+            AUTH_USERNAME: 'owner',
+            AUTH_PASSWORD_HASH: hashPassword('a long test password'),
+            ALLOW_CLIENT_CREDENTIALS: 'true'
         }
     });
     child.stderr.on('data', d => { stderr += d; });
@@ -118,7 +122,7 @@ test('OAuth redirect_uri is checked by exact hostname', async () => {
     }), { redirect: 'manual' });
 
     for (const good of ['https://claude.ai/api/mcp/auth_callback', 'https://chatgpt.com/connector_platform_oauth_redirect', 'http://localhost:6274/callback']) {
-        assert.equal((await authorize(good)).status, 302, good);
+        assert.equal((await authorize(good)).status, 200, good);  // sign-in page
     }
     for (const bad of ['https://evil.example/?claude.ai', 'https://claude.ai.evil.example/cb', 'http://claude.ai/cb', 'not a url']) {
         assert.equal((await authorize(bad)).status, 400, bad);

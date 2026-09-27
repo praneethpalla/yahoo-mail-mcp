@@ -28,7 +28,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # Copy application code
-COPY server.js ./
+COPY server.js auth.js ./
 
 # Create a non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
