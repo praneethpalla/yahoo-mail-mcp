@@ -2,6 +2,19 @@
 
 A Model Context Protocol (MCP) server that provides full email management for Yahoo Mail via IMAP. It works with any MCP client (Claude, ChatGPT, Cursor, VS Code, and others): local stdio transport for desktop apps, and Streamable HTTP (plus legacy SSE) for remote access.
 
+> **Forked from [jtokib/yahoo-mail-mcp-server](https://github.com/jtokib/yahoo-mail-mcp-server)** (MIT). The original provides the IMAP server, UID-based email tools, OAuth 2.0 flow, and Render/Docker deployment. This fork adds the features below.
+
+## What's New in This Fork
+
+- **Draft emails from any AI assistant**: `create_draft`, `create_reply_draft` (threaded, with reply-all and quoting), and `update_draft`, so the assistant can revise a draft from your feedback. Drafts land in Yahoo Mail's Drafts folder; **nothing is ever sent** without you.
+- **Attachments**: `download_attachments` saves files to disk, and `read_email` lists attachment names, types, and sizes.
+- **Streamable HTTP**: the current MCP transport at `/mcp`, stateless, so it survives cold starts and sleeping hosts. Legacy SSE still works.
+- **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
+- **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
+- **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
+- **Security fix**: the OAuth `redirect_uri` check now matches the exact hostname; the old substring check accepted URLs like `https://evil.example/?claude.ai`.
+- **Offline test suite**: `npm test` runs 32 tests against fake IMAP servers, with no real email login.
+
 ## Features
 
 - **Secure OAuth 2.0 Authentication**: Protect your remote MCP server with OAuth 2.0 authorization code flow with PKCE
@@ -59,8 +72,8 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd yahoo-mail-mcp-server
+git clone https://github.com/praneethpalla/yahoo-mail-mcp.git
+cd yahoo-mail-mcp
 
 # Copy environment template
 cp .env.example .env
@@ -1149,11 +1162,11 @@ This project is designed to work seamlessly on:
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License. See the [LICENSE](LICENSE) file. Original work © jtokib; modifications © praneethpalla.
 
 ## Support
 
-- **Issues**: Report bugs at https://github.com/yourusername/yahoo-mail-mcp-server/issues
+- **Issues**: Report bugs at https://github.com/praneethpalla/yahoo-mail-mcp/issues
 - **Discussions**: Ask questions in GitHub Discussions
 - **MCP Docs**: https://modelcontextprotocol.io
 

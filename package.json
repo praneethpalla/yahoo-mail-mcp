@@ -25,7 +25,18 @@
     "email",
     "model-context-protocol"
   ],
-  "author": "",
+  "author": "praneethpalla",
+  "contributors": [
+    "jtokib (original author)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/praneethpalla/yahoo-mail-mcp.git"
+  },
+  "homepage": "https://github.com/praneethpalla/yahoo-mail-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/praneethpalla/yahoo-mail-mcp/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
