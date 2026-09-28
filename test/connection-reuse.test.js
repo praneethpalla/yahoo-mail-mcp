@@ -67,3 +67,30 @@ test('calling end() twice releases only once', async () => {
     assert.equal(stats.maxActive, 1);
     server.imapConn?.end();
 });
+
+test('a stuck call past the lease timeout gets its connection closed, not shared', async () => {
+    process.env.IMAP_LEASE_TIMEOUT_MS = '30';
+    const { server, stats } = fakeServer();
+    const stuck = await server.createImapConnection();  // never calls end()
+    const stuckConn = server.imapConn;
+    let destroyed = false;
+    stuckConn.destroy = () => { destroyed = true; stuckConn.state = 'disconnected'; };
+
+    await server.listFolders();  // waits for the timeout, then must get a new connection
+    assert.equal(destroyed, true, 'the stuck connection was closed');
+    assert.equal(stats.logins, 2, 'the next call logged in fresh instead of reusing it');
+    assert.notEqual(server.imapConn, stuckConn);
+    assert.throws(() => stuck.getBoxes(() => {}), /used after it was released/);
+
+    delete process.env.IMAP_LEASE_TIMEOUT_MS;
+    server.imapConn?.end();
+});
+
+test('a released handle refuses further use, so it cannot touch another call\'s folder', async () => {
+    const { server } = fakeServer();
+    const lease = await server.createImapConnection();
+    lease.end();
+    assert.throws(() => lease.getBoxes(() => {}), /used after it was released \(getBoxes\)/);
+    await server.listFolders();  // the next call still works normally
+    server.imapConn?.end();
+});

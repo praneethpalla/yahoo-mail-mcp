@@ -15,7 +15,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 60 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 62 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -25,7 +25,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (60 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (62 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -662,6 +662,7 @@ docker ps
 | `OAUTH_REDIRECT_HOSTS` | No | `claude.ai,claude.com` | Hostnames allowed as OAuth redirect targets (https only; subdomains allowed; localhost is always allowed). Add other clients, e.g. `chatgpt.com` |
 | `DRAFTS_FOLDER` | No | auto-detected | Drafts folder name. Normally detected from the server's `\Drafts` folder flag (Yahoo: `Draft`) |
 | `IMAP_IDLE_MS` | No | `300000` | Log out of the shared IMAP connection after this many milliseconds without use |
+| `IMAP_LEASE_TIMEOUT_MS` | No | `300000` | If one tool call holds the connection longer than this, the connection is closed (that call fails) and the next call logs in fresh |
 | `ENV_FILE` | No | `.env` | Env file to load, relative to `server.js` (e.g. `.env.test` for a test account) |
 | `NODE_ENV` | No | `development` | Environment: `development` or `production` |
 
@@ -1265,7 +1266,7 @@ update_draft({ uid: 395417, body: "Dear Jane, ...", cc: ["manager@example.com"] 
 
 ### IMAP Performance
 
-- **Shared connection**: Tool calls reuse one IMAP login and take turns on it; the connection logs out after `IMAP_IDLE_MS` (default 5 minutes) without use and reconnects on the next call
+- **Shared connection**: Tool calls reuse one IMAP login and take turns on it through a lock, and each call selects its own folder, so calls never see each other's selected mailbox. The connection logs out after `IMAP_IDLE_MS` (default 5 minutes) without use and reconnects on the next call. A call that holds it longer than `IMAP_LEASE_TIMEOUT_MS` has its connection closed rather than shared, and a released handle refuses further use
 - **Timeout**: 30 seconds for connection and auth
 - **Rate limiting**: Yahoo may throttle excessive requests
 - **Recommendation**: Cache results on client side when possible

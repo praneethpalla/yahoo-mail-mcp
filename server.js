@@ -570,17 +570,35 @@ class YahooMailMCPServer {
             this.scheduleIdleLogout();
             release();
         };
-        // Safety net: never let one stuck call block every later call
+        // Safety net: never let one stuck call block every later call. The connection is closed rather
+        // than handed on, because the stuck call may still be using it: IMAP is stateful, so the next
+        // call's SELECT would change the folder under it. The stuck call fails; the next call logs in fresh.
+        const leaseTimeoutMs = Number(process.env.IMAP_LEASE_TIMEOUT_MS) || 5 * 60 * 1000;
         const safetyTimer = setTimeout(() => {
-            console.error('[IMAP] Connection held for over 5 minutes; releasing it');
+            console.error(`[IMAP] Connection held for over ${Math.round(leaseTimeoutMs / 1000)} seconds; closing it`);
+            if (this.imapConn === conn) this.imapConn = null;
+            try {
+                if (typeof conn.destroy === 'function') conn.destroy();
+                else conn.end();
+            } catch {
+                // already closed
+            }
             done();
-        }, 5 * 60 * 1000);
+        }, leaseTimeoutMs);
 
+        // Each tool call gets its own handle to the shared connection; after end() it refuses further use,
+        // so a released handle can never touch the connection while another call holds it
         return new Proxy(conn, {
             get: (target, prop) => {
                 if (prop === 'end') return done;
                 const value = target[prop];
-                return typeof value === 'function' ? value.bind(target) : value;
+                if (typeof value !== 'function') return value;
+                return (...args) => {
+                    if (released) {
+                        throw new Error(`IMAP connection used after it was released (${String(prop)})`);
+                    }
+                    return value.apply(target, args);
+                };
             }
         });
     }
