@@ -4,7 +4,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { YahooMailMCPServer } from '../server.js';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 afterEach(() => {
     delete process.env.YAHOO_APP_PASSWORD_COMMAND;
@@ -14,17 +18,31 @@ afterEach(() => {
 test('uses the command output (trailing newline removed) and runs it only once', async () => {
     const counter = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pwcmd-')), 'runs');
     process.env.YAHOO_APP_PASSWORD_COMMAND = `echo run >> "${counter}"; printf 'from-store\\n'`;
-    process.env.YAHOO_APP_PASSWORD = 'from-env';
     const server = new YahooMailMCPServer();
     assert.equal(await server.getAppPassword(), 'from-store');
     assert.equal(await server.getAppPassword(), 'from-store');
     assert.equal(fs.readFileSync(counter, 'utf8').trim().split('\n').length, 1, 'cached after the first read');
 });
 
-test('falls back to YAHOO_APP_PASSWORD when no command is set', async () => {
-    process.env.YAHOO_APP_PASSWORD = 'from-env';
-    assert.equal(await new YahooMailMCPServer().getAppPassword(), 'from-env');
+test('there is no plain-text fallback: without a command there is no password', async () => {
+    process.env.YAHOO_APP_PASSWORD = 'plain-text';
+    assert.equal(await new YahooMailMCPServer().getAppPassword(), null);
 });
+
+for (const mode of ['stdio', 'http']) {
+    test(`the server refuses to start (${mode}) when a plain YAHOO_APP_PASSWORD is set`, async () => {
+        const proc = spawn(process.execPath, ['server.js'], {
+            cwd: root,
+            env: { PATH: process.env.PATH, ENV_FILE: '/dev/null', TRANSPORT_MODE: mode, YAHOO_EMAIL: 'x@example.invalid', YAHOO_APP_PASSWORD: 'Zq9-dummy-secret', ALLOW_UNAUTHENTICATED: 'true', PORT: '0' }
+        });
+        let err = '';
+        proc.stderr.on('data', d => { err += d; });
+        const code = await new Promise(resolve => proc.on('exit', resolve));
+        assert.equal(code, 1);
+        assert.match(err, /Refusing to start: YAHOO_APP_PASSWORD is set/);
+        assert.ok(!err.includes('Zq9-dummy-secret'), 'the password value is never printed');
+    });
+}
 
 test('a failing command gives an error that does not include its output', async () => {
     process.env.YAHOO_APP_PASSWORD_COMMAND = 'echo leaked-secret; echo more-secret >&2; exit 3';

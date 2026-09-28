@@ -26,8 +26,10 @@ services:
           property: port
       - key: YAHOO_EMAIL
         sync: false  # Set this in Render Dashboard (Settings > Environment)
-      - key: YAHOO_APP_PASSWORD
-        sync: false  # Set this in Render Dashboard (Settings > Environment)
+      # The app password is read from a Render Secret File named "yahoo-app-password"
+      # (Dashboard > Environment > Secret Files), never from an environment variable
+      - key: YAHOO_APP_PASSWORD_COMMAND
+        value: cat /etc/secrets/yahoo-app-password
       - key: OAUTH_CLIENT_ID
         sync: false  # Required: the server refuses to start without OAuth (openssl rand -hex 16)
       - key: OAUTH_CLIENT_SECRET

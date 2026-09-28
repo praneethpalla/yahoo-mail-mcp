@@ -12,10 +12,10 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
-- **App password from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, or pass, so it never sits in a plain-text file; with Keychain, every read needs your approval.
+- **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 58 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 60 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -23,7 +23,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 |---|---|
 | **Local mode** (stdio) with Claude Desktop | ✅ Tested against a real Yahoo mailbox: folders, search, multi-email reads, attachment download, new/reply/revised drafts, bulk flag/unflag, error handling |
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (58 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (60 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -34,14 +34,14 @@ This server needs your Yahoo **app password**: a 16-character password Yahoo gen
 
 | Setup | Who can see the app password | Who can see your email content | Use it from |
 |---|---|---|---|
-| **Local** (recommended): Claude Desktop, Cursor, VS Code, Codex CLI start the server on your computer | Only your computer, ideally in a password store such as macOS Keychain (see below), not a file | Only your computer | That computer's desktop apps |
+| **Local** (recommended): Claude Desktop, Cursor, VS Code, Codex CLI start the server on your computer | Only your computer, in a password store such as macOS Keychain (see below) | Only your computer | That computer's desktop apps |
 | **Hosted** (optional): Render, Fly.io, a VPS, etc. | **The hosting provider** and anyone with access to your hosting account | Passes through the host's servers while tools run | Anywhere: Claude.ai web/mobile, ChatGPT, other remote MCP clients |
 
 **Local setup:** the server runs as a local process, talks to the app through a pipe (stdio), and opens no network port. Your credentials never leave your machine. No sign-in page is needed because nothing is reachable from outside.
 
 ### Keep the app password in a password store, not a file
 
-Set `YAHOO_APP_PASSWORD_COMMAND` to a command that prints the password. The server runs it once when it first needs to log in, keeps the result in memory only (never on disk or in logs), and runs it again after a failed login, for example after you rotate the password.
+The server **only** reads the app password through `YAHOO_APP_PASSWORD_COMMAND`, a command that prints it. There is no plain-text option: if `YAHOO_APP_PASSWORD` is set, the server refuses to start. It runs the command once when it first needs to log in, keeps the result in memory only (never on disk or in logs), and runs it again after a failed login, for example after you rotate the password.
 
 **macOS Keychain (recommended on a Mac):**
 
@@ -50,7 +50,7 @@ Set `YAHOO_APP_PASSWORD_COMMAND` to a command that prints the password. The serv
 #    -T "" trusts no app, so macOS asks you to Allow or Deny every read.
 security add-generic-password -a "you@yahoo.com" -s yahoo-mail-mcp -T "" -w
 
-# 2. In .env, remove YAHOO_APP_PASSWORD and add:
+# 2. In .env, set:
 YAHOO_APP_PASSWORD_COMMAND=security find-generic-password -a you@yahoo.com -s yahoo-mail-mcp -w
 ```
 
@@ -65,7 +65,8 @@ To update it after rotating: run the same `add-generic-password` command with `-
 - Linux (GNOME Keyring, KWallet): `secret-tool lookup service yahoo-mail-mcp`
 - pass: `pass show yahoo-mail-mcp`
 
-`YAHOO_APP_PASSWORD` in `.env` still works, but the password then sits in a plain-text file that any program running as you can read.
+- Docker: a secret file mounted into the container, `cat /run/secrets/yahoo-app-password` (see Docker Usage)
+- Render: a Render Secret File, `cat /etc/secrets/yahoo-app-password` (see Deploying to Render)
 
 ### Rotate after testing
 
@@ -75,7 +76,7 @@ Revoke the app password at [Yahoo account security](https://login.yahoo.com/acco
 
 | Setting | Stored on the host as | Notes |
 |---|---|---|
-| `YAHOO_APP_PASSWORD` | Readable | Required to log in to Yahoo |
+| App password (Secret File, read via `YAHOO_APP_PASSWORD_COMMAND`) | Readable | Required to log in to Yahoo |
 | `OAUTH_CLIENT_SECRET` | Readable | Signs access tokens; changing it logs out every app |
 | `AUTH_TOTP_SECRET` | Readable | Required to check authenticator codes |
 | Your sign-in password | **Hash only** (scrypt) | The real password is never stored anywhere |
@@ -166,10 +167,18 @@ cp .env.example .env
 
 Edit `.env` file with your credentials:
 
+First store the app password in your password store (see [Keep the app password in a password store](#keep-the-app-password-in-a-password-store-not-a-file)). On a Mac:
+
+```bash
+security add-generic-password -a your.email@yahoo.com -s yahoo-mail-mcp -T "" -w
+```
+
+Then edit `.env` (it never contains the password itself):
+
 ```env
 YAHOO_EMAIL=your.email@yahoo.com
-YAHOO_APP_PASSWORD=your16charpassword
-TRANSPORT_MODE=stdio  # or 'sse' for HTTP mode
+YAHOO_APP_PASSWORD_COMMAND=security find-generic-password -a your.email@yahoo.com -s yahoo-mail-mcp -w
+TRANSPORT_MODE=stdio  # or 'http' for remote access
 PORT=3000
 ```
 
@@ -244,16 +253,24 @@ npm run docker:compose:down
 
 ### Manual Docker Commands
 
+Put the app password in a secret file first (never in an environment variable):
+
+```bash
+mkdir -p secrets && printf '%s' 'your-app-password' > secrets/yahoo-app-password && chmod 600 secrets/yahoo-app-password
+```
+
+`secrets/` is gitignored and excluded from the image. If the container can't read the file (it runs as a non-root user), run it with your own user ID (`--user "$(id -u):$(id -g)"`). HTTP mode also needs the OAuth and `AUTH_*` settings in `.env` (see [Environment Variables Reference](#environment-variables-reference)).
+
 **Windows (PowerShell):**
 ```powershell
 # Build
 docker build -t yahoo-mail-mcp .
 
 # Run
-docker run -p 3000:3000 `
-  -e YAHOO_EMAIL=your.email@yahoo.com `
-  -e YAHOO_APP_PASSWORD=yourpassword `
-  -e TRANSPORT_MODE=sse `
+docker run -p 3000:3000 --env-file .env `
+  -v ${PWD}/secrets/yahoo-app-password:/run/secrets/yahoo-app-password:ro `
+  -e YAHOO_APP_PASSWORD_COMMAND="cat /run/secrets/yahoo-app-password" `
+  -e TRANSPORT_MODE=http `
   yahoo-mail-mcp
 
 # Or with Docker Compose
@@ -266,10 +283,10 @@ docker-compose up -d
 docker build -t yahoo-mail-mcp .
 
 # Run
-docker run -p 3000:3000 \
-  -e YAHOO_EMAIL=your.email@yahoo.com \
-  -e YAHOO_APP_PASSWORD=yourpassword \
-  -e TRANSPORT_MODE=sse \
+docker run -p 3000:3000 --env-file .env \
+  -v "$PWD/secrets/yahoo-app-password:/run/secrets/yahoo-app-password:ro" \
+  -e YAHOO_APP_PASSWORD_COMMAND="cat /run/secrets/yahoo-app-password" \
+  -e TRANSPORT_MODE=http \
   yahoo-mail-mcp
 
 # Or with Docker Compose
@@ -421,7 +438,7 @@ git push -u origin main
    | `TRANSPORT_MODE` | `http` | - |
    | `TRUST_PROXY` | `1` | - (Render runs behind one proxy; needed for per-address sign-in lockouts) |
    | `YAHOO_EMAIL` | `your.email@yahoo.com` | Your Yahoo email address |
-   | `YAHOO_APP_PASSWORD` | `your16charpassword` | See "Get Yahoo Mail App Password" section |
+   | `YAHOO_APP_PASSWORD_COMMAND` | `cat /etc/secrets/yahoo-app-password` | Already set by `render.yaml` |
    | `OAUTH_CLIENT_ID` | `32-char-hex-string` | Run: `openssl rand -hex 16` |
    | `OAUTH_CLIENT_SECRET` | `64-char-hex-string` | Run: `openssl rand -hex 32` |
    | `AUTH_USERNAME` | your sign-in name | Run: `npm run setup-login -- --out ~/yahoo-mcp-login.txt` |
@@ -431,7 +448,8 @@ git push -u origin main
    `npm run setup-login` asks for a username and password (hidden while typing), creates an authenticator secret, and writes all three `AUTH_*` values to the file you choose (readable only by you). Add the secret to Google Authenticator, 1Password, Authy, or similar via "Enter a setup key", then delete the file once everything is copied.
 
    **Important**:
-   - Mark `YAHOO_EMAIL`, `YAHOO_APP_PASSWORD`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `AUTH_PASSWORD_HASH`, and `AUTH_TOTP_SECRET` as "Secret"
+   - **App password:** under Environment > **Secret Files**, add a file named `yahoo-app-password` containing only the app password. Render mounts it at `/etc/secrets/yahoo-app-password`; it is never an environment variable
+   - Mark `YAHOO_EMAIL`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `AUTH_PASSWORD_HASH`, and `AUTH_TOTP_SECRET` as "Secret"
    - The server refuses to start in HTTP mode without the OAuth and `AUTH_USERNAME`/`AUTH_PASSWORD_HASH` settings
    - `PORT` is automatically set by Render, don't add it manually
    - Save the OAuth credentials - you'll need them to configure Claude Desktop
@@ -613,8 +631,8 @@ docker ps
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `YAHOO_EMAIL` | Yes | - | Your Yahoo Mail email address |
-| `YAHOO_APP_PASSWORD_COMMAND` | One of these two | - | Command that prints the app password, e.g. `security find-generic-password -a you@yahoo.com -s yahoo-mail-mcp -w` (macOS Keychain). Recommended: keeps the password out of files. Run once per login; the result stays in memory only |
-| `YAHOO_APP_PASSWORD` | One of these two | - | 16-character app-specific password from Yahoo, in plain text. Used only when `YAHOO_APP_PASSWORD_COMMAND` isn't set |
+| `YAHOO_APP_PASSWORD_COMMAND` | Yes | - | Command that prints the app password, e.g. `security find-generic-password -a you@yahoo.com -s yahoo-mail-mcp -w` (macOS Keychain), `cat /run/secrets/yahoo-app-password` (Docker), or `cat /etc/secrets/yahoo-app-password` (Render). Run once per login; the result stays in memory only |
+| `YAHOO_APP_PASSWORD` | **Not supported** | - | Plain-text app passwords are refused: the server won't start if this is set |
 | `OAUTH_CLIENT_ID` | Yes (Remote) | - | OAuth 2.0 client ID for MCP server authentication (generate with `openssl rand -hex 16`) |
 | `OAUTH_CLIENT_SECRET` | Yes (Remote) | - | OAuth 2.0 client secret for MCP server authentication (generate with `openssl rand -hex 32`) |
 | `TRANSPORT_MODE` | No | `stdio` | `stdio`, or `http` for remote access (Streamable HTTP at `/mcp` + legacy SSE at `/mcp/sse`; `sse` is an alias) |

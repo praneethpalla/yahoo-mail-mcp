@@ -16,7 +16,10 @@ services:
       - TRANSPORT_MODE=http
       - PORT=3000
       - YAHOO_EMAIL=${YAHOO_EMAIL}
-      - YAHOO_APP_PASSWORD=${YAHOO_APP_PASSWORD}
+      # The app password is read from a mounted secret file, never from an environment variable
+      - YAHOO_APP_PASSWORD_COMMAND=cat /run/secrets/yahoo-app-password
+    secrets:
+      - yahoo-app-password
     env_file:
       - .env
     restart: unless-stopped
@@ -35,3 +38,8 @@ services:
 networks:
   mcp-network:
     driver: bridge
+
+# Create ./secrets/yahoo-app-password containing only the app password (chmod 600; gitignored)
+secrets:
+  yahoo-app-password:
+    file: ./secrets/yahoo-app-password

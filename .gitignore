@@ -57,3 +57,6 @@ build/
 # Temporary files
 tmp/
 temp/
+
+# App password secret files (Docker / local)
+secrets/

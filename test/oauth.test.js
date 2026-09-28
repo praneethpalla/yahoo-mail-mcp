@@ -22,7 +22,7 @@ const baseEnv = {
     ENV_FILE: '/dev/null',
     TRANSPORT_MODE: 'http',
     YAHOO_EMAIL: 'dummy@example.invalid',
-    YAHOO_APP_PASSWORD: 'dummy'
+    YAHOO_APP_PASSWORD_COMMAND: 'printf dummy'
 };
 const oauthEnv = { OAUTH_CLIENT_ID: 'test-client', OAUTH_CLIENT_SECRET: 'sec:ret' };
 const loginEnv = { AUTH_USERNAME: 'owner', AUTH_PASSWORD_HASH: PASSWORD_HASH };

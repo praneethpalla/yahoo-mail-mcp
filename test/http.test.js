@@ -26,7 +26,7 @@ before(async () => {
             TRANSPORT_MODE: 'http',
             PORT: String(PORT),
             YAHOO_EMAIL: 'dummy@example.invalid',
-            YAHOO_APP_PASSWORD: 'dummy',
+            YAHOO_APP_PASSWORD_COMMAND: 'printf dummy',
             OAUTH_CLIENT_ID: 'test-client',
             OAUTH_CLIENT_SECRET: 'test-secret',
             OAUTH_REDIRECT_HOSTS: 'claude.ai,claude.com,chatgpt.com',

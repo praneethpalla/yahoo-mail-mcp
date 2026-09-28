@@ -628,15 +628,15 @@ class YahooMailMCPServer {
     /**
      * Get the Yahoo app password.
      *
-     * With YAHOO_APP_PASSWORD_COMMAND set, runs that command and uses its output, so the password can
-     * live in a password store instead of a file (macOS Keychain, 1Password CLI, secret-tool, pass, ...).
-     * The result is kept in memory only, and re-read after a failed login (e.g. after rotating it).
-     * Otherwise falls back to YAHOO_APP_PASSWORD.
+     * Runs YAHOO_APP_PASSWORD_COMMAND and uses its output, so the password lives in a password store
+     * (macOS Keychain, 1Password CLI, secret-tool, pass, a mounted secret file, ...), never in .env.
+     * There is deliberately no plain-text fallback. The result is kept in memory only, and re-read
+     * after a failed login (e.g. after rotating it).
      */
     async getAppPassword() {
         const command = process.env.YAHOO_APP_PASSWORD_COMMAND;
         if (!command) {
-            return process.env.YAHOO_APP_PASSWORD || null;
+            return null;
         }
         if (this.appPasswordCache) {
             return this.appPasswordCache;
@@ -672,7 +672,7 @@ class YahooMailMCPServer {
 
         return new Promise((resolve, reject) => {
             if (!process.env.YAHOO_EMAIL || !password) {
-                const error = new Error('YAHOO_EMAIL and either YAHOO_APP_PASSWORD_COMMAND or YAHOO_APP_PASSWORD must be set');
+                const error = new Error('YAHOO_EMAIL and YAHOO_APP_PASSWORD_COMMAND must be set (the app password is read from a password store; see README)');
                 console.error('[IMAP] Configuration error:', error.message);
                 reject(error);
                 return;
@@ -2028,6 +2028,14 @@ class YahooMailMCPServer {
     }
 
     async run() {
+        // No plain-text app passwords: refuse to start rather than silently use one
+        if (process.env.YAHOO_APP_PASSWORD) {
+            console.error('[Server] Refusing to start: YAHOO_APP_PASSWORD is set, but plain-text app passwords are not supported.');
+            console.error('[Server] Store the password in a password store (e.g. macOS Keychain), remove YAHOO_APP_PASSWORD,');
+            console.error('[Server] and set YAHOO_APP_PASSWORD_COMMAND to a command that prints it. See README: "Keep the app password in a password store".');
+            process.exit(1);
+        }
+
         // Check if we should use SSE (HTTP) or stdio transport
         const transportMode = process.env.TRANSPORT_MODE || 'stdio';
 
@@ -2214,7 +2222,7 @@ class YahooMailMCPServer {
         console.error('[Server] Node version:', process.version);
         console.error('[Server] Environment:', process.env.NODE_ENV || 'development');
         console.error('[Server] Email configured:', !!process.env.YAHOO_EMAIL);
-        console.error('[Server] Password configured:', process.env.YAHOO_APP_PASSWORD_COMMAND ? 'via YAHOO_APP_PASSWORD_COMMAND' : !!process.env.YAHOO_APP_PASSWORD);
+        console.error('[Server] Password command configured:', !!process.env.YAHOO_APP_PASSWORD_COMMAND);
 
         // Enable CORS for Claude.ai and remote MCP connections
         app.use(cors({
@@ -2611,7 +2619,7 @@ class YahooMailMCPServer {
                     nodeVersion: process.version,
                     platform: process.platform,
                     emailConfigured: !!process.env.YAHOO_EMAIL,
-                    passwordConfigured: !!(process.env.YAHOO_APP_PASSWORD_COMMAND || process.env.YAHOO_APP_PASSWORD),
+                    passwordConfigured: !!process.env.YAHOO_APP_PASSWORD_COMMAND,
                     transportMode: process.env.TRANSPORT_MODE || 'stdio'
                 }
             });
