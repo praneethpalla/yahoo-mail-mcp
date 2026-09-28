@@ -12,9 +12,10 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
+- **App password from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, or pass, so it never sits in a plain-text file; with Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 53 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 58 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -22,21 +23,53 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 |---|---|
 | **Local mode** (stdio) with Claude Desktop | ✅ Tested against a real Yahoo mailbox: folders, search, multi-email reads, attachment download, new/reply/revised drafts, bulk flag/unflag, error handling |
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (53 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (58 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
 
 ## Where Your Credentials Live (Read This First)
 
-This server needs your Yahoo **app password**: a 16-character password Yahoo generates for one app (like a personal access token). It gives **full mailbox access** (read, move, delete, drafts), bypasses 2-step verification, and **never expires** until you revoke it. Where it lives depends on how you run the server:
+This server needs your Yahoo **app password**: a 16-character password Yahoo generates for one app (like a personal access token). It gives **full mailbox access** (read, move, delete, drafts) and also works for **sending mail over SMTP**. This server never sends, but anyone who steals the password could send as you and damage your sender reputation. It bypasses 2-step verification and **never expires** until you revoke it. Treat it like your real password. Where it lives depends on how you run the server:
 
 | Setup | Who can see the app password | Who can see your email content | Use it from |
 |---|---|---|---|
-| **Local** (recommended): Claude Desktop, Cursor, VS Code, Codex CLI start the server on your computer | Only your computer (in `.env`) | Only your computer | That computer's desktop apps |
+| **Local** (recommended): Claude Desktop, Cursor, VS Code, Codex CLI start the server on your computer | Only your computer, ideally in a password store such as macOS Keychain (see below), not a file | Only your computer | That computer's desktop apps |
 | **Hosted** (optional): Render, Fly.io, a VPS, etc. | **The hosting provider** and anyone with access to your hosting account | Passes through the host's servers while tools run | Anywhere: Claude.ai web/mobile, ChatGPT, other remote MCP clients |
 
 **Local setup:** the server runs as a local process, talks to the app through a pipe (stdio), and opens no network port. Your credentials never leave your machine. No sign-in page is needed because nothing is reachable from outside.
+
+### Keep the app password in a password store, not a file
+
+Set `YAHOO_APP_PASSWORD_COMMAND` to a command that prints the password. The server runs it once when it first needs to log in, keeps the result in memory only (never on disk or in logs), and runs it again after a failed login, for example after you rotate the password.
+
+**macOS Keychain (recommended on a Mac):**
+
+```bash
+# 1. Store it. Type the app password at the prompt (hidden; it never appears in your shell history).
+#    -T "" trusts no app, so macOS asks you to Allow or Deny every read.
+security add-generic-password -a "you@yahoo.com" -s yahoo-mail-mcp -T "" -w
+
+# 2. In .env, remove YAHOO_APP_PASSWORD and add:
+YAHOO_APP_PASSWORD_COMMAND=security find-generic-password -a you@yahoo.com -s yahoo-mail-mcp -w
+```
+
+When your MCP app starts the server, macOS asks whether `security` may use the item:
+- Click **Allow** (not "Always Allow") to keep approving each start. No program, including an AI assistant running commands on your machine, can then read the password without you seeing a dialog.
+- "Always Allow" skips future dialogs, but then **any** program running as you can read it silently with the same command.
+
+To update it after rotating: run the same `add-generic-password` command with `-U` added. To remove it: `security delete-generic-password -a "you@yahoo.com" -s yahoo-mail-mcp`.
+
+**Other password stores:** `YAHOO_APP_PASSWORD_COMMAND` works with any command that prints the password, for example:
+- 1Password CLI: `op read "op://Private/Yahoo MCP/password"`
+- Linux (GNOME Keyring, KWallet): `secret-tool lookup service yahoo-mail-mcp`
+- pass: `pass show yahoo-mail-mcp`
+
+`YAHOO_APP_PASSWORD` in `.env` still works, but the password then sits in a plain-text file that any program running as you can read.
+
+### Rotate after testing
+
+Revoke the app password at [Yahoo account security](https://login.yahoo.com/account/security) when you finish testing or stop using a setup, then generate a new one for ongoing use. Yahoo lets you revoke app passwords one at a time without changing your main password.
 
 **Hosted setup:** the server must hold the app password in readable form to log in to Yahoo, so **you are trusting the host**. The sign-in page, MFA, and OAuth protect who can *use* your server; they don't hide anything from the host itself. What the host holds:
 
@@ -51,7 +84,7 @@ This server needs your Yahoo **app password**: a 16-character password Yahoo gen
 1. **Create a separate app password just for the host** (e.g. named `MCP Render`), so you can revoke it without affecting anything else.
 2. **Turn on 2-step verification for your hosting and GitHub accounts.** Someone breaking into those is a more likely risk than the host itself.
 3. Store every credential as a **secret** environment variable, never in the repository.
-4. **Revoke the app password** at [Yahoo account security](https://login.yahoo.com/account/security) whenever you stop hosting or suspect a leak, and change `OAUTH_CLIENT_SECRET` to disconnect every app immediately.
+4. **Revoke the app password** at [Yahoo account security](https://login.yahoo.com/account/security) after testing, whenever you stop hosting, or if you suspect a leak, and change `OAUTH_CLIENT_SECRET` to disconnect every app immediately.
 5. Only host if you need web, mobile, or ChatGPT access. If you only use desktop apps, stay local.
 
 **Logging:** the server logs request paths, OAuth events, and connection errors. It is written not to log passwords, tokens, secrets, email addresses, or email content.
@@ -580,7 +613,8 @@ docker ps
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `YAHOO_EMAIL` | Yes | - | Your Yahoo Mail email address |
-| `YAHOO_APP_PASSWORD` | Yes | - | 16-character app-specific password from Yahoo |
+| `YAHOO_APP_PASSWORD_COMMAND` | One of these two | - | Command that prints the app password, e.g. `security find-generic-password -a you@yahoo.com -s yahoo-mail-mcp -w` (macOS Keychain). Recommended: keeps the password out of files. Run once per login; the result stays in memory only |
+| `YAHOO_APP_PASSWORD` | One of these two | - | 16-character app-specific password from Yahoo, in plain text. Used only when `YAHOO_APP_PASSWORD_COMMAND` isn't set |
 | `OAUTH_CLIENT_ID` | Yes (Remote) | - | OAuth 2.0 client ID for MCP server authentication (generate with `openssl rand -hex 16`) |
 | `OAUTH_CLIENT_SECRET` | Yes (Remote) | - | OAuth 2.0 client secret for MCP server authentication (generate with `openssl rand -hex 32`) |
 | `TRANSPORT_MODE` | No | `stdio` | `stdio`, or `http` for remote access (Streamable HTTP at `/mcp` + legacy SSE at `/mcp/sse`; `sse` is an alias) |

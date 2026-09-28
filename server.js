@@ -21,6 +21,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import crypto from 'crypto';
+import { execFile } from 'child_process';
 import {
     verifyPassword, verifyTotp, base32Decode, signFormToken, verifyFormToken, renderLoginPage, renderErrorPage
 } from './auth.js';
@@ -625,12 +626,53 @@ class YahooMailMCPServer {
     }
 
     /**
+     * Get the Yahoo app password.
+     *
+     * With YAHOO_APP_PASSWORD_COMMAND set, runs that command and uses its output, so the password can
+     * live in a password store instead of a file (macOS Keychain, 1Password CLI, secret-tool, pass, ...).
+     * The result is kept in memory only, and re-read after a failed login (e.g. after rotating it).
+     * Otherwise falls back to YAHOO_APP_PASSWORD.
+     */
+    async getAppPassword() {
+        const command = process.env.YAHOO_APP_PASSWORD_COMMAND;
+        if (!command) {
+            return process.env.YAHOO_APP_PASSWORD || null;
+        }
+        if (this.appPasswordCache) {
+            return this.appPasswordCache;
+        }
+
+        const [shell, flag] = process.platform === 'win32' ? ['cmd.exe', '/c'] : ['/bin/sh', '-c'];
+        const output = await new Promise((resolve, reject) => {
+            // Long timeout: the password store may show an approval dialog (e.g. Keychain "Allow/Deny")
+            execFile(shell, [flag, command], { timeout: 120000, windowsHide: true }, (err, stdout) => {
+                if (err) {
+                    // Don't include stdout/stderr in the error: they could contain the secret
+                    reject(new Error(`YAHOO_APP_PASSWORD_COMMAND failed (${err.killed ? 'timed out' : `exit code ${err.code}`}). ` +
+                        'Check the command, and allow access if your password store asked for approval.'));
+                    return;
+                }
+                resolve(stdout);
+            });
+        });
+
+        const password = output.replace(/\r?\n$/, '');
+        if (!password) {
+            throw new Error('YAHOO_APP_PASSWORD_COMMAND printed nothing');
+        }
+        this.appPasswordCache = password;
+        return password;
+    }
+
+    /**
      * Open a new IMAP connection using app-specific password (like the working test script)
      */
     async openImapConnection() {
+        const password = process.env.YAHOO_EMAIL ? await this.getAppPassword() : null;
+
         return new Promise((resolve, reject) => {
-            if (!process.env.YAHOO_EMAIL || !process.env.YAHOO_APP_PASSWORD) {
-                const error = new Error('YAHOO_EMAIL or YAHOO_APP_PASSWORD environment variables are not set');
+            if (!process.env.YAHOO_EMAIL || !password) {
+                const error = new Error('YAHOO_EMAIL and either YAHOO_APP_PASSWORD_COMMAND or YAHOO_APP_PASSWORD must be set');
                 console.error('[IMAP] Configuration error:', error.message);
                 reject(error);
                 return;
@@ -638,7 +680,7 @@ class YahooMailMCPServer {
 
             const imap = new Imap({
                 user: process.env.YAHOO_EMAIL,
-                password: process.env.YAHOO_APP_PASSWORD,
+                password,
                 host: 'imap.mail.yahoo.com',
                 port: 993,
                 tls: true,
@@ -674,6 +716,7 @@ class YahooMailMCPServer {
                 if (err.message.includes('Invalid credentials') ||
                     err.message.includes('authentication failed') ||
                     err.message.includes('AUTHENTICATIONFAILED')) {
+                    this.appPasswordCache = null;  // re-read from the password store next time (e.g. after rotating it)
                     errorMessage = `Authentication failed: ${err.message}. Please check Yahoo Mail app password. Regenerate at https://login.yahoo.com/account/security`;
                 }
                 // Network/connection errors
@@ -2171,7 +2214,7 @@ class YahooMailMCPServer {
         console.error('[Server] Node version:', process.version);
         console.error('[Server] Environment:', process.env.NODE_ENV || 'development');
         console.error('[Server] Email configured:', !!process.env.YAHOO_EMAIL);
-        console.error('[Server] Password configured:', !!process.env.YAHOO_APP_PASSWORD);
+        console.error('[Server] Password configured:', process.env.YAHOO_APP_PASSWORD_COMMAND ? 'via YAHOO_APP_PASSWORD_COMMAND' : !!process.env.YAHOO_APP_PASSWORD);
 
         // Enable CORS for Claude.ai and remote MCP connections
         app.use(cors({
@@ -2568,7 +2611,7 @@ class YahooMailMCPServer {
                     nodeVersion: process.version,
                     platform: process.platform,
                     emailConfigured: !!process.env.YAHOO_EMAIL,
-                    passwordConfigured: !!process.env.YAHOO_APP_PASSWORD,
+                    passwordConfigured: !!(process.env.YAHOO_APP_PASSWORD_COMMAND || process.env.YAHOO_APP_PASSWORD),
                     transportMode: process.env.TRANSPORT_MODE || 'stdio'
                 }
             });
