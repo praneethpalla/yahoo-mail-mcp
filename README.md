@@ -23,6 +23,8 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 |---|---|
 | **Local mode** (stdio) with Claude Desktop | ✅ Tested against a real Yahoo mailbox: folders, search, multi-email reads, attachment download, new/reply/revised drafts, bulk flag/unflag, error handling |
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
+| App password from macOS Keychain | ⚠️ The password-command mechanism is covered by offline tests; the Keychain setup itself hasn't been tried live yet |
+| App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
 | **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (60 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
@@ -59,6 +61,18 @@ When your MCP app starts the server, macOS asks whether `security` may use the i
 - "Always Allow" skips future dialogs, but then **any** program running as you can read it silently with the same command.
 
 To update it after rotating: run the same `add-generic-password` command with `-U` added. To remove it: `security delete-generic-password -a "you@yahoo.com" -s yahoo-mail-mcp`.
+
+**Windows Credential Manager:**
+
+```powershell
+# 1. Store it. You'll be prompted for the app password (hidden input).
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-credential.ps1 -Set -User you@yahoo.com
+
+# 2. In .env (use the full path to your copy of the repository; quote it if it contains spaces):
+YAHOO_APP_PASSWORD_COMMAND=powershell -NoProfile -ExecutionPolicy Bypass -File "C:\path\to\yahoo-mail-mcp\scripts\windows-credential.ps1"
+```
+
+The script uses Windows' own credential functions (no extra modules) and stores a Generic credential named `yahoo-mail-mcp`, visible under Control Panel > Credential Manager > Windows Credentials. Unlike Keychain's strict mode, **Credential Manager doesn't ask before each read**: any program running as your Windows user can read it. It is still encrypted by Windows and kept out of every project file. For per-read approval on Windows, use the 1Password CLI with Windows Hello (below).
 
 **Other password stores:** `YAHOO_APP_PASSWORD_COMMAND` works with any command that prints the password, for example:
 - 1Password CLI: `op read "op://Private/Yahoo MCP/password"`
@@ -687,6 +701,7 @@ yahoo-mail-mcp-server/
 ├── .gitattributes           # Git line ending configuration
 ├── auth.js                  # Sign-in helpers: password hashing, TOTP, login page
 ├── scripts/setup-login.js   # Creates the AUTH_* sign-in settings
+├── scripts/windows-credential.ps1  # Stores/reads the app password in Windows Credential Manager
 ├── test/                    # Offline tests (node --test), fake IMAP servers
 └── README.md                # This file
 ```

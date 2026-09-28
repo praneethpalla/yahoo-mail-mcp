@@ -21,7 +21,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
+import { exec } from 'child_process';
 import {
     verifyPassword, verifyTotp, base32Decode, signFormToken, verifyFormToken, renderLoginPage, renderErrorPage
 } from './auth.js';
@@ -642,10 +642,10 @@ class YahooMailMCPServer {
             return this.appPasswordCache;
         }
 
-        const [shell, flag] = process.platform === 'win32' ? ['cmd.exe', '/c'] : ['/bin/sh', '-c'];
         const output = await new Promise((resolve, reject) => {
+            // exec uses the platform shell (/bin/sh, or cmd.exe on Windows) with correct quoting.
             // Long timeout: the password store may show an approval dialog (e.g. Keychain "Allow/Deny")
-            execFile(shell, [flag, command], { timeout: 120000, windowsHide: true }, (err, stdout) => {
+            exec(command, { timeout: 120000, windowsHide: true }, (err, stdout) => {
                 if (err) {
                     // Don't include stdout/stderr in the error: they could contain the secret
                     reject(new Error(`YAHOO_APP_PASSWORD_COMMAND failed (${err.killed ? 'timed out' : `exit code ${err.code}`}). ` +
