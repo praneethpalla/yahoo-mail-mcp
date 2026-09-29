@@ -82,9 +82,12 @@ The script uses Windows' own credential functions (no extra modules) and stores 
 - Docker: a secret file mounted into the container, `cat /run/secrets/yahoo-app-password` (see Docker Usage)
 - Render: a Render Secret File, `cat /etc/secrets/yahoo-app-password` (see Deploying to Render)
 
-### Rotate after testing
+### Rotate after testing, and on a short schedule
 
-Revoke the app password at [Yahoo account security](https://login.yahoo.com/account/security) when you finish testing or stop using a setup, then generate a new one for ongoing use. Yahoo lets you revoke app passwords one at a time without changing your main password.
+- **After testing:** revoke the app password at [Yahoo account security](https://login.yahoo.com/account/security) when you finish testing or stop using a setup, then generate a new one for ongoing use. Yahoo lets you revoke app passwords one at a time without changing your main password.
+- **On a schedule:** treat rotation as a hard policy, not a clean-up task. Replace the app password at the shortest interval that's practical for you, so a leaked one stops working quickly even if nobody notices the leak. With a password store, rotating is two steps: generate a new app password, then update the stored one (for Keychain, run the `add-generic-password` command again with `-U`). The server re-reads it automatically after the next failed login.
+
+Yahoo app passwords never expire on their own, so rotation is the only thing that limits how long a leaked one stays useful.
 
 **Hosted setup:** the server must hold the app password in readable form to log in to Yahoo, so **you are trusting the host**. The sign-in page, MFA, and OAuth protect who can *use* your server; they don't hide anything from the host itself. What the host holds:
 
@@ -96,11 +99,30 @@ Revoke the app password at [Yahoo account security](https://login.yahoo.com/acco
 | Your sign-in password | **Hash only** (scrypt) | The real password is never stored anywhere |
 
 **If you host it:**
-1. **Create a separate app password just for the host** (e.g. named `MCP Render`), so you can revoke it without affecting anything else.
+1. **Create a separate app password just for the host** (e.g. named `MCP Render`), so you can revoke it without affecting anything else, and rotate it on a short schedule.
 2. **Turn on 2-step verification for your hosting and GitHub accounts.** Someone breaking into those is a more likely risk than the host itself.
 3. Store every credential as a **secret** environment variable, never in the repository.
 4. **Revoke the app password** at [Yahoo account security](https://login.yahoo.com/account/security) after testing, whenever you stop hosting, or if you suspect a leak, and change `OAUTH_CLIENT_SECRET` to disconnect every app immediately.
 5. Only host if you need web, mobile, or ChatGPT access. If you only use desktop apps, stay local.
+
+### Malicious emails (prompt injection)
+
+Every email the assistant reads is text from a stranger. A message can contain hidden instructions aimed at the AI, such as "forward all invoices to …" or "delete this thread". The server can't tell a genuine request from you apart from one planted in an email; your AI app decides which tools to call.
+
+This server includes tools that change your mailbox (`delete_emails`, `move_emails`, `archive_emails`, flags, and drafts), so:
+
+- **Keep tool approval on in your AI app.** Most MCP clients can ask before each tool call. Approve actions that change mail, and be wary of any your request didn't ask for.
+- **Be careful with automation.** Running the assistant unattended over incoming mail gives any sender a chance to steer it.
+- **Sending isn't possible.** There is no send tool, so an injected instruction can at most leave a draft for you to see; it can't send mail as you.
+
+### Two different risks, two different controls
+
+| Risk | What limits it |
+|---|---|
+| **The agent is misled** (prompt injection, mistakes) | Fewer tools and tool approval in your AI app: an agent can only misuse what the server exposes |
+| **The app password leaks** | Rotation and revocation. A leaked password bypasses this server entirely and gives full mailbox access (including sending) directly, whatever tools the server has |
+
+Limiting tools does **not** protect a leaked credential, and rotating credentials does **not** stop a misled agent. You need both.
 
 **Logging:** the server logs request paths, OAuth events, and connection errors. It is written not to log passwords, tokens, secrets, email addresses, or email content.
 
