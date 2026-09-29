@@ -12,10 +12,11 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **One shared IMAP login**: tool calls reuse a single Yahoo login instead of logging in on every call, which avoids Yahoo's login throttling.
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
+- **Prompt-injection defenses**: everything a sender wrote is returned inside clearly marked untrusted-content blocks that the email can't close early; hidden HTML and invisible characters are stripped; bodies are length-capped; tools carry MCP risk annotations; and `READ_ONLY` / `ENABLED_TOOLS` limit which tools exist at all.
 - **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 62 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 70 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -25,7 +26,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (62 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (70 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -109,7 +110,15 @@ Yahoo app passwords never expire on their own, so rotation is the only thing tha
 
 Every email the assistant reads is text from a stranger. A message can contain hidden instructions aimed at the AI, such as "forward all invoices to …" or "delete this thread". The server can't tell a genuine request from you apart from one planted in an email; your AI app decides which tools to call.
 
-This server includes tools that change your mailbox (`delete_emails`, `move_emails`, `archive_emails`, flags, and drafts), so:
+**What the server does about it:**
+
+- **Marks external content as data.** Everything the sender wrote (body, subject, sender name, recipients, attachment names) is returned inside an `<untrusted-content>` block, with a note telling the AI to treat it as data and not follow instructions in it. Each block has a random id, and marker-like text inside the email is neutralized, so an email can't close the block early and "speak" from outside it. List and search results label their `from`/`subject` fields the same way.
+- **Shows only what a person would see.** HTML is converted to text after removing hidden elements (`display:none`, zero or 1px fonts, `visibility:hidden`, `opacity:0`, transparent text, off-screen positioning, Outlook-hidden blocks, comments, scripts). The HTML part is preferred over a plain-text part that mail apps don't display. Invisible Unicode (zero-width characters, text-direction overrides, "tag" characters) is stripped everywhere, including attachment file names.
+- **Caps length.** Email bodies are cut at `READ_EMAIL_MAX_CHARS` (default 20,000 characters), with a note saying how much was cut.
+- **Labels risky tools.** Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`), so AI apps can ask before destructive actions such as `delete_emails` or `move_emails`.
+- **Lets you remove tools entirely (least privilege).** `READ_ONLY=true` keeps only tools that don't change the mailbox. `ENABLED_TOOLS=read_email,search_emails,create_reply_draft` keeps exactly the tools you list. Disabled tools are hidden and refused if called.
+
+These reduce the risk but can't eliminate it: the AI model still decides what to do with what it reads. So also:
 
 - **Keep tool approval on in your AI app.** Most MCP clients can ask before each tool call. Approve actions that change mail, and be wary of any your request didn't ask for.
 - **Be careful with automation.** Running the assistant unattended over incoming mail gives any sender a chance to steer it.
@@ -119,7 +128,7 @@ This server includes tools that change your mailbox (`delete_emails`, `move_emai
 
 | Risk | What limits it |
 |---|---|
-| **The agent is misled** (prompt injection, mistakes) | Fewer tools and tool approval in your AI app: an agent can only misuse what the server exposes |
+| **The agent is misled** (prompt injection, mistakes) | Untrusted-content marking and hidden-text removal, fewer tools (`READ_ONLY`, `ENABLED_TOOLS`), and tool approval in your AI app: an agent can only misuse what the server exposes |
 | **The app password leaks** | Rotation and revocation. A leaked password bypasses this server entirely and gives full mailbox access (including sending) directly, whatever tools the server has |
 
 Limiting tools does **not** protect a leaked credential, and rotating credentials does **not** stop a misled agent. You need both.
@@ -683,6 +692,9 @@ docker ps
 | `ALLOW_UNAUTHENTICATED` | No | - | Set to `true` to run HTTP mode without OAuth or a sign-in. **Local testing only**: anyone who can reach the server can read and change the mailbox |
 | `OAUTH_REDIRECT_HOSTS` | No | `claude.ai,claude.com` | Hostnames allowed as OAuth redirect targets (https only; subdomains allowed; localhost is always allowed). Add other clients, e.g. `chatgpt.com` |
 | `DRAFTS_FOLDER` | No | auto-detected | Drafts folder name. Normally detected from the server's `\Drafts` folder flag (Yahoo: `Draft`) |
+| `READ_ONLY` | No | - | `true` keeps only tools that don't change the mailbox: `list_emails`, `read_email`, `search_emails`, `list_folders`, `download_attachments` |
+| `ENABLED_TOOLS` | No | all | Comma-separated list of the only tools to expose, e.g. `read_email,search_emails,create_reply_draft`. Unknown names stop the server from starting |
+| `READ_EMAIL_MAX_CHARS` | No | `20000` | Maximum characters of each email body returned by `read_email` |
 | `IMAP_IDLE_MS` | No | `300000` | Log out of the shared IMAP connection after this many milliseconds without use |
 | `IMAP_LEASE_TIMEOUT_MS` | No | `300000` | If one tool call holds the connection longer than this, the connection is closed (that call fails) and the next call logs in fresh |
 | `ENV_FILE` | No | `.env` | Env file to load, relative to `server.js` (e.g. `.env.test` for a test account) |
@@ -723,6 +735,7 @@ yahoo-mail-mcp-server/
 ├── .gitignore               # Files to exclude from git
 ├── .gitattributes           # Git line ending configuration
 ├── auth.js                  # Sign-in helpers: password hashing, TOTP, login page
+├── untrusted.js             # Prompt-injection defenses: sanitizing, hidden-HTML removal, untrusted-content blocks
 ├── scripts/setup-login.js   # Creates the AUTH_* sign-in settings
 ├── scripts/windows-credential.ps1  # Stores/reads the app password in Windows Credential Manager
 ├── test/                    # Offline tests (node --test), fake IMAP servers
