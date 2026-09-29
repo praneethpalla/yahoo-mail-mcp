@@ -93,6 +93,7 @@ class FakeImap extends EventEmitter {
 
 function setup(opts) {
     process.env.YAHOO_EMAIL = ME;
+    process.env.DRAFT_ATTACHMENT_DIRS = os.tmpdir();  // these tests attach files from temporary folders
     delete process.env.DRAFTS_FOLDER;
     const server = new YahooMailMCPServer();
     const imap = new FakeImap(opts);
