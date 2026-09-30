@@ -414,8 +414,7 @@ class YahooMailMCPServer {
                                 },
                                 includeInline: {
                                     type: 'boolean',
-                                    description: 'Also save embedded images such as signature logos and social icons (default: false)',
-                                    default: false
+                                    description: 'Also save embedded images such as signature logos and social icons (default: false, unless the server sets ATTACHMENT_INCLUDE_INLINE=true)'
                                 }
                             },
                             required: ['uid']
@@ -586,7 +585,9 @@ class YahooMailMCPServer {
                         return await this.listFolders();
 
                     case 'download_attachments':
-                        return await this.downloadAttachments(args.uid, args.folder, args.filenames, args.saveDir, args.includeInline === true);
+                        // The per-call parameter wins; ATTACHMENT_INCLUDE_INLINE sets the default when it isn't passed
+                        return await this.downloadAttachments(args.uid, args.folder, args.filenames, args.saveDir,
+                            typeof args.includeInline === 'boolean' ? args.includeInline : process.env.ATTACHMENT_INCLUDE_INLINE === 'true');
 
                     case 'create_draft':
                         return await this.createDraft(args);

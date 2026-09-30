@@ -220,3 +220,27 @@ test('read_email lists the real attachment and summarizes embedded images', asyn
     assert.ok(!/  - fb\.png/.test(text), 'icons are not listed as attachments');
     assert.match(text, /Embedded images: 6 \(logos, icons/);
 });
+
+test('ATTACHMENT_INCLUDE_INLINE sets the default; the per-call parameter still wins', async () => {
+    process.env.ATTACHMENT_INCLUDE_INLINE = 'true';
+    try {
+        const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+        const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+        const server = await serverWithEmail(await statementEmail());
+        const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+        await server.createMcpServer().connect(serverSide);
+        const client = new Client({ name: 't', version: '1' });
+        await client.connect(clientSide);
+
+        const byDefault = tmp();
+        await client.callTool({ name: 'download_attachments', arguments: { uid: 4, saveDir: byDefault } });
+        assert.equal((await fs.readdir(byDefault)).length, 7, 'setting on: embedded images saved');
+
+        const overridden = tmp();
+        await client.callTool({ name: 'download_attachments', arguments: { uid: 4, saveDir: overridden, includeInline: false } });
+        assert.deepEqual(await fs.readdir(overridden), ['statement.pdf'], 'includeInline: false wins');
+        await client.close();
+    } finally {
+        delete process.env.ATTACHMENT_INCLUDE_INLINE;
+    }
+});
