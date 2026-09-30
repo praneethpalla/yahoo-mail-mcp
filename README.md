@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 89 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 93 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -28,7 +28,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
 | Download hardening (ZIP inspection, size limit, private files, download tag) | ✅ Tested with Claude Desktop on macOS: real downloads are saved private (`0600`) with the quarantine tag. ZIP and size checks are offline-tested. ⚠️ The Windows Mark of the Web hasn't been tested on Windows |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (89 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (93 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -1278,8 +1278,9 @@ Save an email's attachments to disk. The email is opened read-only, so it isn't 
 - `folder` (optional): Folder containing the email (default: 'INBOX')
 - `filenames` (optional): Only download attachments with these filenames (default: all)
 - `saveDir` (optional): Directory to save to (default: `~/Downloads/yahoo-attachments`)
+- `includeInline` (optional): Also save embedded images such as signature logos and social icons (default: false). Embedded images are skipped unless this is true or they're named in `filenames`
 
-**Response:** Paths, types, and sizes of the saved files. Existing files are never overwritten; copies get names like `report (1).pdf`.
+**Response:** Paths, types, and sizes of the saved files, and how many embedded images were skipped. Existing files are never overwritten; copies get names like `report (1).pdf`.
 
 **Examples:**
 ```javascript

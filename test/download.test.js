@@ -146,3 +146,77 @@ test('an after-save hook (e.g. antivirus) can reject a saved file, which is then
     assert.match(text, /scanned: clean/);
     assert.deepEqual(await fs.readdir(dir), ['clean.txt'], 'the rejected file was removed');
 });
+
+// An email like a typical statement: one real PDF plus social icons embedded in the signature
+async function statementEmail() {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex');
+    const icons = ['fb', 'insta', 'twit', 'yt', 'link', 'do'];
+    return {
+        attachments: [
+            { filename: 'statement.pdf', content: Buffer.from('%PDF-1.7 statement') },
+            ...icons.map(name => ({ filename: `${name}.png`, content: png, cid: `${name}@sig` }))
+        ],
+        html: `<p>Your statement is attached.</p><p>${icons.map(n => `<img src="cid:${n}@sig">`).join('')}</p>`
+    };
+}
+
+async function serverWithEmail(fields) {
+    const raw = await new MailComposer({ from: 'bank@example.com', to: 'me@example.com', subject: 'Statement', ...fields }).compile().build();
+    const server = new YahooMailMCPServer();
+    const conn = new EventEmitter();
+    conn.state = 'authenticated';
+    conn.openBox = (name, ro, cb) => cb(null, {});
+    conn.fetch = () => {
+        const f = new EventEmitter();
+        setImmediate(async () => {
+            const msg = new EventEmitter();
+            f.emit('message', msg, 1);
+            const body = Readable.from([raw]);
+            msg.emit('body', body, {});
+            msg.emit('attributes', { uid: 4, flags: [], size: raw.length, struct: [] });
+            await new Promise(r => body.on('end', r));
+            msg.emit('end');
+            setTimeout(() => f.emit('end'), 5);
+        });
+        return f;
+    };
+    conn.end = () => {};
+    server.openImapConnection = async () => conn;
+    return server;
+}
+
+test('embedded signature images are skipped by default; only the real attachment is saved', async () => {
+    const server = await serverWithEmail(await statementEmail());
+    const dir = tmp();
+    const result = await server.downloadAttachments(4, 'INBOX', null, dir);
+    assert.deepEqual(await fs.readdir(dir), ['statement.pdf']);
+    assert.match(result.content[0].text, /Skipped 6 embedded image\(s\)/);
+});
+
+test('includeInline saves embedded images too, and naming one in filenames saves it', async () => {
+    const server = await serverWithEmail(await statementEmail());
+    const all = tmp();
+    await server.downloadAttachments(4, 'INBOX', null, all, true);
+    assert.equal((await fs.readdir(all)).length, 7);
+
+    const one = tmp();
+    await server.downloadAttachments(4, 'INBOX', ['fb.png'], one);
+    assert.deepEqual(await fs.readdir(one), ['fb.png']);
+});
+
+test('an email with only embedded images saves nothing and says why', async () => {
+    const { attachments, html } = await statementEmail();
+    const server = await serverWithEmail({ attachments: attachments.slice(1), html });
+    const dir = tmp();
+    const result = await server.downloadAttachments(4, 'INBOX', null, dir);
+    assert.match(result.content[0].text, /no regular attachments, only 6 embedded image\(s\)/);
+    assert.deepEqual(await fs.readdir(dir), []);
+});
+
+test('read_email lists the real attachment and summarizes embedded images', async () => {
+    const server = await serverWithEmail(await statementEmail());
+    const text = (await server.readEmail([4])).content[0].text;
+    assert.match(text, /Attachments:\n  - statement\.pdf/);
+    assert.ok(!/  - fb\.png/.test(text), 'icons are not listed as attachments');
+    assert.match(text, /Embedded images: 6 \(logos, icons/);
+});
