@@ -27,7 +27,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
-| Download hardening (ZIP inspection, size limit, private files, download tag) | ✅ Offline-tested on macOS, including the real quarantine tag; ⚠️ the Windows Mark of the Web hasn't been tested on Windows |
+| Download hardening (ZIP inspection, size limit, private files, download tag) | ✅ Tested with Claude Desktop on macOS: real downloads are saved private (`0600`) with the quarantine tag. ZIP and size checks are offline-tested. ⚠️ The Windows Mark of the Web hasn't been tested on Windows |
 | **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (89 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
