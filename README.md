@@ -13,11 +13,11 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **Faster bulk actions**: read/unread, flag, archive, and move run as one IMAP command; delete stays one email at a time.
 - **Bug fixes**: empty `read_email` results for large emails, multi-email reads returning only the first email, sizes always 0, invalid search dates silently ignored, and a missing `isError` flag on errors.
 - **Prompt-injection defenses**: everything a sender wrote is returned inside clearly marked untrusted-content blocks that the email can't close early; hidden HTML and invisible characters are stripped; bodies are length-capped; tools carry MCP risk annotations; and `READ_ONLY` / `ENABLED_TOOLS` limit which tools exist at all.
-- **Safety hooks**: automatic checks the AI can't switch off. Emails with payment red flags (changed bank details, IBANs, wire transfers, gift cards, crypto, urgency), a redirected Reply-To, or a spoofed sender name get server warnings; programs and scripts are never saved from attachments (even when disguised as a PDF); drafts can only attach files from one allowed folder. Add your own rules with `SAFETY_HOOKS_MODULE`.
+- **Safety hooks**: automatic checks the AI can't switch off. Emails with payment red flags (changed bank details, IBANs, wire transfers, gift cards, crypto, urgency), a redirected Reply-To, or a spoofed sender name get server warnings; programs and scripts are never saved from attachments (even when disguised as a PDF or hidden inside a ZIP); saved files are private and tagged as downloaded so macOS Gatekeeper / Windows SmartScreen check them; drafts can only attach files from one allowed folder. Add your own rules with `SAFETY_HOOKS_MODULE`.
 - **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 82 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 89 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -27,7 +27,8 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | Other local clients (Cursor, VS Code, Codex CLI, ...) | ⚠️ Should work (standard MCP stdio), not yet tested |
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (82 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| Download hardening (ZIP inspection, size limit, private files, download tag) | ✅ Offline-tested on macOS, including the real quarantine tag; ⚠️ the Windows Mark of the Web hasn't been tested on Windows |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (89 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -132,8 +133,14 @@ Checks that run automatically at three points. They either add a **warning** or 
 | Hook | Runs | Checks |
 |---|---|---|
 | `readEmail` | Every email read | **Payment red flags**: changed bank or payment details, IBANs, SWIFT/routing codes, account numbers, wire-transfer requests, gift cards, crypto wallets, urgency combined with payment. **Reply-To** that differs from the sender. **Display-name spoofing** such as `"support@paypal.com" <billing@evil.example>` |
-| `beforeSaveAttachment` | Before an attachment is written to disk | **Blocks** programs and scripts: by extension (`.exe`, `.js`, `.scr`, `.dmg`, `.pkg`, `.iso`, `.ps1`, `.sh`, …), by declared type, and **by file contents** (Windows, Linux, and macOS program headers, `#!` scripts), so an `.exe` renamed to `invoice.pdf` is still refused. **Warns** about macro-enabled Office files, archives, attached web pages, and double extensions |
+| `beforeSaveAttachment` | Before an attachment is written to disk | **Blocks** programs and scripts: by extension (`.exe`, `.js`, `.scr`, `.dmg`, `.pkg`, `.iso`, `.ps1`, `.sh`, …), by declared type, and **by file contents** (Windows, Linux, and macOS program headers, `#!` scripts), so an `.exe` renamed to `invoice.pdf` is still refused. **Blocks** files over `ATTACHMENT_MAX_BYTES` (default 25 MB) and **ZIP files containing programs** (the ZIP's file list is read without extracting anything, even if the ZIP is renamed). **Warns** about password-protected or nested archives, other archive types it can't look inside, macro-enabled Office files, attached web pages, and double extensions |
+| `afterSaveAttachment` | After a file is saved (custom hooks only) | Receives `ctx.filePath` so you can scan the saved file (e.g. with an antivirus). A block **deletes** the file |
 | `beforeDraft` | Before a draft is saved | **Blocks** attachments from outside the allowed folders (default: `~/Downloads/yahoo-attachments`, following symlinks and `..`), so an injected "attach ~/.ssh/id_rsa" fails. **Warns** when a reply goes to a Reply-To address instead of the sender, or when the draft contains payment details |
+
+**Every saved attachment is also:**
+
+- **Private:** readable and writable by you only (`0600`), never executable; a download folder the server creates is `0700`.
+- **Marked as downloaded:** on macOS the file gets the `com.apple.quarantine` tag browsers add, so Gatekeeper checks it and asks before it opens. On Windows it gets the Mark of the Web (`Zone.Identifier`, internet zone), so SmartScreen and Office Protected View apply. If the tag can't be set, the file is deleted rather than left unchecked (fail closed). `ATTACHMENT_QUARANTINE=false` turns this off.
 
 The payment checks are warnings, not blocks: they look for patterns, and legitimate invoices trigger them too. The point is to make you verify payment requests through a contact you already trust.
 
@@ -146,6 +153,23 @@ export function beforeDraft(ctx) {
         return { block: 'Drafts about wire transfers must be written by hand.' };
     }
     return { warnings: [] };
+}
+```
+
+**Antivirus example** (ClamAV): scan each saved file, and delete it if a threat is found.
+
+```js
+// av-hooks.mjs: requires ClamAV (e.g. `brew install clamav`, then set up its database)
+import { execFile } from 'node:child_process';
+
+export function afterSaveAttachment(ctx) {
+    return new Promise((resolve) => {
+        execFile('clamscan', ['--no-summary', ctx.filePath], (err, stdout) => {
+            if (!err) return resolve({ warnings: [] });                       // exit 0: clean
+            if (err.code === 1) return resolve({ block: `Antivirus: ${stdout.trim()}` }); // exit 1: threat found
+            resolve({ block: `Antivirus scan failed for ${ctx.filename}` });  // anything else: fail closed
+        });
+    });
 }
 ```
 
@@ -721,6 +745,8 @@ docker ps
 | `ENABLED_TOOLS` | No | all | Comma-separated list of the only tools to expose, e.g. `read_email,search_emails,create_reply_draft`. Unknown names stop the server from starting |
 | `DRAFT_ATTACHMENT_DIRS` | No | `~/Downloads/yahoo-attachments` | Comma-separated folders that draft attachments may come from. Anything else is blocked |
 | `ATTACHMENT_ALLOW_EXTENSIONS` | No | - | Comma-separated file types to allow despite the program/script block, e.g. `sh,ps1`. Use sparingly |
+| `ATTACHMENT_MAX_BYTES` | No | `26214400` (25 MB) | Largest attachment `download_attachments` will save |
+| `ATTACHMENT_QUARANTINE` | No | on | Set to `false` to stop tagging saved files as downloaded (macOS quarantine / Windows Mark of the Web) |
 | `SAFETY_HOOKS_MODULE` | No | - | Path to a JavaScript module with your own safety hooks (see [Safety hooks](#safety-hooks)) |
 | `READ_EMAIL_MAX_CHARS` | No | `20000` | Maximum characters of each email body returned by `read_email` |
 | `IMAP_IDLE_MS` | No | `300000` | Log out of the shared IMAP connection after this many milliseconds without use |

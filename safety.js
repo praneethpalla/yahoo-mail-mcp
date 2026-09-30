@@ -3,7 +3,10 @@
  *
  *   readEmail            - every email read: payment red flags, Reply-To mismatch, sender spoofing
  *   beforeSaveAttachment - before an attachment is written to disk: blocks executables and scripts
- *                          (by extension and by file contents), warns about macros, archives, HTML
+ *                          (by extension and by file contents), oversized files, and ZIPs containing
+ *                          programs; warns about macros, encrypted or nested archives, HTML
+ *   afterSaveAttachment  - after a file is saved (custom hooks only, e.g. an antivirus scan of
+ *                          ctx.filePath); a block deletes the file
  *   beforeDraft          - before a draft is saved: attachments only from allowed folders,
  *                          warnings for Reply-To mismatch and payment details
  *
@@ -17,6 +20,7 @@
  */
 
 import fs from 'fs/promises';
+import { execFile } from 'child_process';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -104,11 +108,17 @@ export function executableSignature(content) {
     return null;
 }
 
-export function checkAttachment({ filename = '', contentType = '', content }) {
+export function checkAttachment({ filename = '', contentType = '', content, size }) {
     const name = String(filename).toLowerCase().trim().replace(/[.\s]+$/, '');
     const parts = name.split('.');
     const ext = parts.length > 1 ? parts.pop() : '';
     const warnings = [];
+
+    const maxBytes = Number(process.env.ATTACHMENT_MAX_BYTES) || 25 * 1024 * 1024;
+    const bytes = size ?? (content ? content.length : 0);
+    if (bytes > maxBytes) {
+        return { block: `"${filename}" is ${Math.round(bytes / 1048576)} MB, over the ${Math.round(maxBytes / 1048576)} MB limit (ATTACHMENT_MAX_BYTES).`, warnings };
+    }
 
     const signature = executableSignature(content);
     if (signature && !allowedByEnv(ext)) {
@@ -125,9 +135,110 @@ export function checkAttachment({ filename = '', contentType = '', content }) {
         warnings.push(`"${filename}" has a double extension (.${innerExt}.${ext}); the real type is .${ext}.`);
     }
     if (MACRO_EXTENSIONS.has(ext)) warnings.push(`"${filename}" is an Office file that can contain macros. Don't enable macros unless you trust the sender.`);
-    if (ARCHIVE_EXTENSIONS.has(ext)) warnings.push(`"${filename}" is an archive; it may contain programs. Check its contents before opening them.`);
+    if (isZip(ext, content)) {
+        const zip = checkZipContents(filename, content);
+        if (zip.block) return { block: zip.block, warnings };
+        warnings.push(...zip.warnings);
+    } else if (ARCHIVE_EXTENSIONS.has(ext)) {
+        warnings.push(`"${filename}" is an archive (.${ext}) whose contents this server can't check; it may contain programs.`);
+    }
     if (HTML_EXTENSIONS.has(ext)) warnings.push(`"${filename}" is a web page; attached web pages are often used for fake sign-in forms.`);
     return { block: null, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// ZIP inspection: read the list of files inside, without extracting anything
+// ---------------------------------------------------------------------------
+
+// ZIP-based document formats whose contents are not user files
+const ZIP_DOCUMENT_EXTENSIONS = new Set(['docx', 'xlsx', 'pptx', 'docm', 'xlsm', 'pptm', 'odt', 'ods', 'odp', 'epub', 'jar', 'apk', 'xpi', 'vsix', 'nupkg']);
+
+/**
+ * List the entries of a ZIP file from its central directory. Returns { entries: [{ name, encrypted }] }
+ * or { error } when the archive can't be read (e.g. corrupted or ZIP64).
+ */
+export function inspectZip(content) {
+    const b = Buffer.isBuffer(content) ? content : Buffer.from(content || []);
+    // End of central directory record: at least 22 bytes, followed by a comment of up to 65535 bytes
+    const searchStart = Math.max(0, b.length - 22 - 65535);
+    let eocd = -1;
+    for (let i = b.length - 22; i >= searchStart; i--) {
+        if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd === -1) return { error: 'no ZIP directory found' };
+
+    const count = b.readUInt16LE(eocd + 10);
+    const dirSize = b.readUInt32LE(eocd + 12);
+    const dirOffset = b.readUInt32LE(eocd + 16);
+    if (count === 0xffff || dirOffset === 0xffffffff || dirSize === 0xffffffff) return { error: 'ZIP64 archives are not inspected' };
+    if (dirOffset + dirSize > b.length) return { error: 'ZIP directory is out of range' };
+
+    const entries = [];
+    let pos = dirOffset;
+    for (let i = 0; i < count; i++) {
+        if (pos + 46 > b.length || b.readUInt32LE(pos) !== 0x02014b50) return { error: 'ZIP directory is damaged' };
+        const flags = b.readUInt16LE(pos + 8);
+        const nameLength = b.readUInt16LE(pos + 28);
+        const extraLength = b.readUInt16LE(pos + 30);
+        const commentLength = b.readUInt16LE(pos + 32);
+        const name = b.slice(pos + 46, pos + 46 + nameLength).toString(flags & 0x800 ? 'utf8' : 'latin1');
+        entries.push({ name, encrypted: Boolean(flags & 0x1) });
+        pos += 46 + nameLength + extraLength + commentLength;
+    }
+    return { entries };
+}
+
+function isZip(ext, content) {
+    if (ZIP_DOCUMENT_EXTENSIONS.has(ext)) return false;
+    const b = Buffer.isBuffer(content) ? content : Buffer.from(content || []);
+    return ext === 'zip' || (b.length >= 4 && b.readUInt32LE(0) === 0x04034b50);
+}
+
+function checkZipContents(filename, content) {
+    const result = inspectZip(content);
+    if (result.error) {
+        return { block: null, warnings: [`"${filename}" is an archive whose contents couldn't be checked (${result.error}). Don't open programs inside it.`] };
+    }
+    const warnings = [];
+    for (const entry of result.entries) {
+        if (entry.name.endsWith('/')) continue;  // folder
+        const base = entry.name.split('/').pop().toLowerCase().trim().replace(/[.\s]+$/, '');
+        const ext = base.includes('.') ? base.split('.').pop() : '';
+        if (BLOCKED_EXTENSIONS.has(ext) && !allowedByEnv(ext)) {
+            return { block: `"${filename}" contains a program or script ("${entry.name}"). Archives with programs are not saved.`, warnings };
+        }
+        if (ARCHIVE_EXTENSIONS.has(ext)) warnings.push(`"${filename}" contains another archive ("${entry.name}"), a common way to hide programs from checks.`);
+        if (MACRO_EXTENSIONS.has(ext)) warnings.push(`"${filename}" contains a macro-enabled Office file ("${entry.name}").`);
+    }
+    if (result.entries.some(e => e.encrypted)) {
+        warnings.push(`"${filename}" is password-protected. Encrypted archives (with the password in the email) are a common way to get malware past scanners.`);
+    }
+    return { block: null, warnings: [...new Set(warnings)] };
+}
+
+// ---------------------------------------------------------------------------
+// Downloaded-file marking: the same "from the internet" tag browsers add
+// ---------------------------------------------------------------------------
+
+/**
+ * Tag a saved file as downloaded, so the operating system checks it before it's opened:
+ * macOS quarantine (Gatekeeper) or Windows Mark of the Web (SmartScreen, Office Protected View).
+ * Returns { applied: true } or { applied: false, reason }. ATTACHMENT_QUARANTINE=false turns it off.
+ */
+export async function markDownloaded(filePath) {
+    if (process.env.ATTACHMENT_QUARANTINE === 'false') return { applied: false, reason: 'turned off by ATTACHMENT_QUARANTINE=false' };
+    if (process.platform === 'darwin') {
+        const value = `0081;${Math.floor(Date.now() / 1000).toString(16)};yahoo-mail-mcp;`;
+        await new Promise((resolve, reject) => {
+            execFile('/usr/bin/xattr', ['-w', 'com.apple.quarantine', value, filePath], (err) => (err ? reject(err) : resolve()));
+        });
+        return { applied: true };
+    }
+    if (process.platform === 'win32') {
+        await fs.writeFile(`${filePath}:Zone.Identifier`, '[ZoneTransfer]\r\nZoneId=3\r\n');
+        return { applied: true };
+    }
+    return { applied: false, reason: `no standard download marking on ${process.platform}` };
 }
 
 // ---------------------------------------------------------------------------
