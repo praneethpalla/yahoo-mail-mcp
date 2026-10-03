@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 - **App password only from a password store**: `YAHOO_APP_PASSWORD_COMMAND` reads it from macOS Keychain, 1Password, secret-tool, pass, or a mounted secret file. Plain-text passwords in `.env` are refused. With Keychain, every read needs your approval.
 - **Sign-in page with MFA**: connecting an app opens a sign-in page (username, password, and a 6-digit authenticator code), like other connectors. Passwords are stored only as scrypt hashes, codes can't be reused, and 5 failed attempts lock an address out for 15 minutes. `npm run setup-login` creates the settings.
 - **OAuth hardening**: signed access tokens that really expire after 1 hour, plus refresh tokens so clients stay connected without re-login, even across restarts and Render sleep. Authorization codes are random, single-use, and valid for 60 seconds. The `redirect_uri` check matches the exact hostname (the old substring check accepted URLs like `https://evil.example/?claude.ai`), and HTTP mode refuses to start without OAuth configured.
-- **Offline test suite**: `npm test` runs 94 tests against fake IMAP servers and a local HTTP server, with no real email login.
+- **Offline test suite**: `npm test` runs 97 tests against fake IMAP servers and a local HTTP server, with no real email login.
 
 ## Project Status
 
@@ -28,7 +28,7 @@ A Model Context Protocol (MCP) server that provides full email management for Ya
 | App password from macOS Keychain | ✅ Tested with Claude Desktop on a real mailbox: the server reads the password from Keychain (no password in any file) and works normally |
 | App password from Windows Credential Manager (`scripts/windows-credential.ps1`) | ⚠️ Not yet tested on Windows |
 | Download hardening (ZIP inspection, size limit, private files, download tag) | ✅ Tested with Claude Desktop on macOS: real downloads are saved private (`0600`) with the quarantine tag. ZIP and size checks are offline-tested. ⚠️ The Windows Mark of the Web hasn't been tested on Windows |
-| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (94 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
+| **Hosted mode** (Streamable HTTP, OAuth, sign-in page with MFA) | ⚠️ **Experimental.** Covered by the offline test suite (97 tests, including the full sign-in and token flow and the official MCP SDK client), but **not yet tested end-to-end** on Render or with Claude.ai / ChatGPT connectors |
 | ChatGPT connectors | ❓ Unverified. This server doesn't support dynamic client registration, so the client must let you enter a client ID and secret |
 
 Feedback and issue reports from hosted setups are very welcome.
@@ -132,7 +132,7 @@ Checks that run automatically at three points. They either add a **warning** or 
 
 | Hook | Runs | Checks |
 |---|---|---|
-| `readEmail` | Every email read | **Payment red flags**: changed bank or payment details, IBANs, SWIFT/routing codes, account numbers, wire-transfer requests, gift cards, crypto wallets, urgency combined with payment. **Reply-To** that differs from the sender. **Display-name spoofing** such as `"support@paypal.com" <billing@evil.example>` |
+| `readEmail` | Every email read | **Payment red flags**: changed bank or payment details, IBANs, SWIFT/routing codes, account numbers, wire-transfer requests, gift cards, crypto wallets, urgency combined with payment. **India-specific**: UPI IDs and pay-to-UPI requests, IFSC codes, NEFT/RTGS/IMPS transfer requests, requests for an OTP/UPI PIN/CVV, KYC/PAN/Aadhaar "verification" demands, disconnection threats, courier/customs fees, and ₹/Rs/INR amounts with urgency (written to stay quiet on routine bank and fund emails). **Reply-To** that differs from the sender. **Display-name spoofing** such as `"support@paypal.com" <billing@evil.example>` |
 | `beforeSaveAttachment` | Before an attachment is written to disk | **Blocks** programs and scripts: by extension (`.exe`, `.js`, `.scr`, `.dmg`, `.pkg`, `.iso`, `.ps1`, `.sh`, …), by declared type, and **by file contents** (Windows, Linux, and macOS program headers, `#!` scripts), so an `.exe` renamed to `invoice.pdf` is still refused. **Blocks** files over `ATTACHMENT_MAX_BYTES` (default 25 MB) and **ZIP files containing programs** (the ZIP's file list is read without extracting anything, even if the ZIP is renamed). **Warns** about password-protected or nested archives, other archive types it can't look inside, macro-enabled Office files, attached web pages, and double extensions |
 | `afterSaveAttachment` | After a file is saved (custom hooks only) | Receives `ctx.filePath` so you can scan the saved file (e.g. with an antivirus). A block **deletes** the file |
 | `beforeDraft` | Before a draft is saved | **Blocks** attachments from outside the allowed folders (default: `~/Downloads/yahoo-attachments`, following symlinks and `..`), so an injected "attach ~/.ssh/id_rsa" fails. **Warns** when a reply goes to a Reply-To address instead of the sender, or when the draft contains payment details |
