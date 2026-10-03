@@ -186,6 +186,68 @@ Limiting tools does **not** protect a leaked credential, and rotating credential
 
 **Never sent, never shared:** the server has no send-mail capability (drafts only), and each deployment serves one mailbox: yours. Nobody else's credentials are involved, and you never need to give yours to anyone else's server.
 
+## Architecture
+
+### Local mode (default)
+
+Your MCP client starts the server as a background process on your computer and talks to it over a private pipe. Nothing listens on a network port; the only outbound connection is to the mail server.
+
+```mermaid
+flowchart LR
+    subgraph Mac["Your computer"]
+        Host["Claude Desktop / Codex / Cursor<br/>(MCP host + client)"]
+        Server["node server.js<br/>yahoo-mail-mcp · Node.js"]
+        Keychain[("OS keychain<br/>app password")]
+        Env[".env<br/>address + password command"]
+        Downloads[("~/Downloads/yahoo-attachments")]
+    end
+    Yahoo[("imap.mail.yahoo.com<br/>your mailbox")]
+
+    Host <-->|"MCP · JSON-RPC 2.0 over stdio<br/>no network port"| Server
+    Server -->|"child process<br/>security find-generic-password"| Keychain
+    Server -->|"read at startup"| Env
+    Server -->|"file write 0600<br/>+ quarantine tag"| Downloads
+    Server <-->|"IMAP over TLS 1.2+<br/>TCP 993"| Yahoo
+```
+
+### Hosted mode (experimental)
+
+For web and mobile clients. The server runs on a host such as Render behind HTTPS and OAuth with a sign-in page.
+
+```mermaid
+flowchart LR
+    Cloud["Claude.ai / ChatGPT<br/>(cloud MCP client)"]
+    Browser["Your browser<br/>sign-in page"]
+    TOTP["Authenticator app<br/>(TOTP)"]
+    subgraph Host["Render (or any host)"]
+        Proxy["HTTPS proxy<br/>TLS on port 443"]
+        App["Docker · Node.js 22<br/>Express · server.js + auth.js<br/>PORT (default 3000)"]
+        Secret[("Secret file<br/>app password")]
+    end
+    Yahoo[("imap.mail.yahoo.com")]
+
+    Cloud -->|"HTTPS 443<br/>POST /mcp (Streamable HTTP)<br/>Bearer token"| Proxy
+    Cloud -->|"OAuth 2.0 + PKCE<br/>POST /oauth/token"| Proxy
+    Browser -->|"HTTPS 443<br/>/oauth/authorize"| Proxy
+    TOTP -.->|"6-digit code, typed by you"| Browser
+    Proxy -->|"HTTP"| App
+    App -->|"password command"| Secret
+    App <-->|"IMAP over TLS<br/>TCP 993"| Yahoo
+```
+
+### Connections
+
+| From → To | Protocol | Port | Technology | Mode |
+|---|---|---|---|---|
+| MCP client → server | MCP (JSON-RPC 2.0) over stdio pipes | none | `@modelcontextprotocol/sdk` | Local |
+| Server → OS keychain | Child process running `YAHOO_APP_PASSWORD_COMMAND` | none | Node.js `child_process` | Both |
+| Server → mail server | IMAP over TLS 1.2+ (LOGIN, EXAMINE/SELECT, UID SEARCH, UID FETCH with BODY.PEEK, APPEND, UID STORE/EXPUNGE/MOVE) | 993 | `imap`, `mailparser`, `nodemailer` (builds drafts only) | Both |
+| Server → disk | File writes (`0600`) + download tag (`com.apple.quarantine` / Mark of the Web) | none | Node.js `fs`, `xattr` | Local |
+| Cloud client → server | HTTPS: Streamable HTTP `POST /mcp` (or legacy SSE `/mcp/sse`) with a Bearer token | 443 → `PORT` | Express, MCP SDK | Hosted |
+| Cloud client → server | OAuth 2.0 authorization code + PKCE; signed access (1 h) and refresh (30 days) tokens | 443 | Node.js `crypto` | Hosted |
+| Browser → server | HTTPS sign-in page: username, password (scrypt hash), TOTP code | 443 | `auth.js` | Hosted |
+| Server → SMTP | Never: the server has no send capability | (unused) | - | - |
+
 ## Features
 
 - **Secure OAuth 2.0 Authentication**: Protect your remote MCP server with OAuth 2.0 authorization code flow with PKCE
